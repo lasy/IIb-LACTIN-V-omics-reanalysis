@@ -3,7 +3,7 @@ Analyses (R scripts and documents) pertaining to the manuscript "Microbiota effe
 
 
 
-Directories 01-02 contain scripts for data cleaning, pre-processing, and assembly into a Bioconductor MultiAssayExperiment object.
+Directories 00-02 contain scripts for data cleaning, pre-processing, and assembly into a Bioconductor MultiAssayExperiment object.
 
 Directory 03 contains sub-directories organized to roughly match the order analyses are presented in the associated manuscript.
 

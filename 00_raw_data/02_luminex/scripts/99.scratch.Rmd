@@ -1,0 +1,333 @@
+
+
+```{r}
+
+library(tidymodels)
+library(tidyverse)
+library(corrr)
+library(cowplot)
+library(ggbeeswarm)
+library(ggforce)
+theme_set(theme_cowplot())
+lactin_v_sample_map <- read_tsv(
+  "/n/groups/kwon/joseph/projects/lactinv_pilot_20220319/input/gates_lactin_v_sample_serial_number_and_metadata_joined_20210125.tsv",
+  col_types = cols(SN = col_character())
+)
+counts <- read_csv("output/00.parse_luminex/count_table.csv")
+
+
+concentrations <- read_csv("output/luminex_concentrations.csv") %>% mutate(Sample = as.character(Sample))
+
+mfis <- read_csv("output/00.parse_luminex/net_mfi_table.csv")
+
+counts %>%
+  filter(run_id == "temp/raw_luminex/2023_02_01_LactinV_Luminex_plate09_rerun.csv") %>%
+  filter(count < 10) %>%
+  left_join(select(mfis, Location, Sample, analyte, net_mfi)) %>%
+  filter(!(analyte %in% c("IL-4", "IL-5"))) %>%
+  #filter(net_mfi > 10) %>%
+  select(run_id, Location, Sample) %>%
+  count(run_id, Location, Sample, name = "analytes_below_threshold") %>%
+  count(analytes_below_threshold)
+
+library(tidyverse)
+setwd("/n/groups/kwon/joseph/projects/gates_lactinv_repository/00_raw_data/luminex/")
+csts <- read_csv("/n/groups/kwon/joseph/projects/lactinv_luminex_report_20230118/LactinV_Luminex_qc_code/lactin_v_CSTs_first_5_runs_2022_10_15.csv") %>%
+  select(Sample = sampleID, CST) %>%
+  separate(Sample, into = c("Sample"))
+
+concentrations <- read_csv("output/luminex_concentrations.csv")
+concentrations %>%
+  filter(analyte %in% c("IP-10", "MIG", "IL-1b", "IL-1a")) %>%
+  filter(run_id == "temp/raw_luminex/2023_02_01_LactinV_Luminex_plate09_rerun.csv") %>%
+  filter(censored == "above_detect_limit") %>%
+  count(Sample, Location, run_id, name="n_above_detection_limit")
+
+myPalette <- colorRampPalette(rev(brewer.pal(9, "PuOr")))
+sc <- scale_colour_gradientn(colours = myPalette(100), limits=c(-1,1))
+
+p0 <- concentrations %>%
+  select(Sample, conc = low_bead_concentration_3, analyte) %>%
+  mutate(conc = log10(conc)) %>%
+  pivot_wider(Sample, names_from = analyte, values_from = conc) %>%
+  select(-Sample) %>%
+  correlate() %>%
+  stretch() %>%
+  ggplot(aes(x = x, y = y, fill = r)) +
+  geom_raster() +
+  scale_fill_gradientn(colours = myPalette(100), limits=c(-1,1))
+
+save_plot("scratch/all_analytes_cor.png", p0, base_height = 10, base_width=11)
+
+analytes_to_remove <- c("IL-4", "IL-5", "IL-12 (p70)", "IL-21", "IL-8", "IL-10", "IL-13")
+
+full_data <- concentrations %>%
+  mutate(Sample = as.character(Sample)) %>%
+  select(Sample, conc = low_bead_concentration_3, analyte) %>%
+  filter(!(analyte %in% analytes_to_remove)) %>%
+  mutate(conc = log10(conc)) %>%
+  pivot_wider(Sample, names_from = analyte, values_from = conc) %>%
+  left_join(csts)
+
+rec <- recipe(CST ~ ., data = full_data) %>%
+  step_zv(all_numeric_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+p1 <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  ggplot() +
+  geom_autopoint(aes(color = CST), alpha = 0.4, size = 2) +
+  geom_autodensity(alpha = .3) +
+  facet_matrix(vars(PC1, PC2, PC3, PC4), layer.diag = 2) +
+  background_grid()
+
+p2 <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  tidy(number = 4) %>%
+  filter(component %in% paste0("PC", 1:4)) %>%
+  group_by(component) %>%
+  slice_max(abs(value), n = 20) %>%
+  ungroup() %>%
+  ggplot(aes(value, terms, fill = value > 0)) +
+  geom_col(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(vars(component), scales = "free_y") +
+  labs(x = "Contribution to principal component", y = NULL) +
+  background_grid()
+
+save_plot("scratch/filter_pca_loadings.png", p2, bg = "white", base_width = 7, base_height = 7)
+
+p1 <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  filter(!is.na(CST)) %>%
+  ggplot() +
+  geom_autopoint(aes(color = CST), alpha = 0.4, size = 2) +
+  geom_autodensity(alpha = .3) +
+  facet_matrix(vars(PC1, PC2, PC3, PC4), layer.diag = 2) +
+  scale_color_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7")) +
+  background_grid()
+save_plot("scratch/filter_pca.png", p1, bg = "white", base_width = 13, base_height = 13)
+
+rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  tidy(number = 3, type = "variance")
+
+p3 <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  pivot_longer(c(-Sample, -CST), names_to = "Component", values_to = "value") %>%
+  filter(!is.na(CST)) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(aes(fill = CST)) +
+  facet_grid(rows = vars(CST), cols = vars(Component), scales = "free_y") +
+  background_grid() +
+  scale_fill_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7"))
+
+save_plot("scratch/filter_pca_by_cst.png", p3, bg = "white", base_width = 9, base_height = 9)
+
+
+p4 <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  pivot_longer(c(-Sample, -CST), names_to = "Component", values_to = "value") %>%
+  left_join(select(lactin_v_sample_map, Sample = SN, visit_number)) %>%
+  filter(!is.na(CST)) %>%
+  filter(visit_number != "01") %>%
+  ggplot(aes(x = CST, y = value)) +
+  geom_quasirandom(aes(color = CST), size = 0.75) +
+  geom_boxplot(fill = "#00000000", outlier.shape = NA) +
+  scale_color_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7")) +
+  facet_grid(rows = vars(Component), scales = "free_y") +
+  background_grid()
+
+save_plot("scratch/filter_pca_by_cst_boxplot_no1.png", p4, bg = "white", base_width = 9, base_height = 7)
+
+lactin_v_sample_map
+
+rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data)
+```
+
+
+```{r}
+
+pca_estimates <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep()
+
+sdev <- pca_estimates$steps[[4]]$res$sdev
+
+percent_variation <- sdev^2 / sum(sdev^2)
+
+var_df <- data.frame(
+  PC = paste0("PC", 1:length(sdev)),
+  var_explained = percent_variation,
+  stringsAsFactors = FALSE
+)
+p5 <- var_df %>%
+  mutate(PC = fct_inorder(PC)) %>%
+  ggplot(aes(x = PC, y = var_explained)) +
+  geom_col() +
+  geom_text(aes(label = format(var_explained, digits = 1)), hjust = 0.5, nudge_y = 0.05) +
+  background_grid()
+
+save_plot("scratch/filter_scree_plot.png", p5, bg = "white", base_width = 8.5, base_height = 4)
+
+
+rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  tidy(number = 4)
+```
+
+
+```{r}
+p6 <- recipe(CST ~ ., data = full_data) %>%
+  step_zv(all_numeric_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors()) %>%
+  prep() %>%
+  bake(new_data = NULL) %>%
+  pivot_longer(cols = c(-Sample, -CST), names_to = "analyte", values_to = "normalized") %>%
+  filter(!is.na(CST)) %>%
+  ggplot(aes(x = CST, y = normalized)) +
+  geom_quasirandom(aes(color = CST), size = 0.75) +
+  geom_boxplot(fill = "#00000000", outlier.shape = NA) +
+  scale_color_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7")) +
+  facet_wrap(~analyte) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  background_grid()
+
+save_plot("scratch/filter_normalized.png", p6, bg = "white", base_width = 13, base_height = 13)
+
+
+p7 <- concentrations %>%
+  mutate(Sample = as.character(Sample)) %>%
+  left_join(select(lactin_v_sample_map, Sample = SN, visit_number)) %>%
+  filter(visit_number != "01") %>%
+  select(Sample, conc = low_bead_concentration_3, analyte) %>%
+  filter(!(analyte %in% analytes_to_remove)) %>%
+  # mutate(conc = log10(conc)) %>%
+  left_join(csts) %>%
+  filter(!is.na(CST)) %>%
+  ggplot(aes(x = CST, y = conc)) +
+  geom_quasirandom(aes(color = CST), size = 0.75) +
+  geom_boxplot(fill = "#00000000", outlier.shape = NA) +
+  scale_color_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7")) +
+  facet_wrap(~analyte, scales = "free_y") +
+  scale_y_log10(expand = expansion(mult = c(0.1, 0.25)), labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  background_grid()
+
+save_plot("scratch/filter_concentrations_by_cst_no1.png", p7, bg = "white", base_width = 13, base_height = 13)
+
+concentrations %>%
+  mutate(Sample = as.character(Sample)) %>%
+  left_join(select(lactin_v_sample_map, Sample = SN, visit_number)) %>%
+  filter(visit_number != "01") %>%
+  select(Sample, conc = low_bead_concentration_3, analyte) %>%
+  filter(!(analyte %in% analytes_to_remove)) %>%
+  # mutate(conc = log10(conc)) %>%
+  left_join(csts) %>%
+  filter(!is.na(CST)) %>%
+  count(CST)
+```
+
+
+```{r}
+full_data
+
+
+p8 <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  left_join(full_data) %>%
+  filter(PC1 > 1) %>%
+  filter(!is.na(CST)) %>%
+  ggplot() +
+  geom_autopoint(aes(color = CST), alpha = 0.4, size = 2) +
+  geom_autodensity(fill = "darkred", alpha = .3) +
+  scale_color_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7")) +
+  facet_matrix(vars(PC1, PC2, `IP-10`, `MIG`, `IL-1a`, `IL-1b`), layer.diag = 2, layer.upper = FALSE) +
+  background_grid()
+
+save_plot("scratch/filter_truncated_pc1_pairplot.png", p8, bg = "white", base_width = 11, base_height = 10)
+
+
+p9 <- rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  left_join(full_data) %>%
+  filter(!is.na(CST)) %>%
+  ggplot() +
+  geom_autopoint(aes(color = CST), alpha = 0.4, size = 2) +
+  geom_autodensity(alpha = .3) +
+  scale_color_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7")) +
+  facet_matrix(vars(PC1, PC2, `IP-10`, `MIG`, `IL-1a`, `IL-1b`), layer.diag = 2, layer.upper = FALSE) +
+  background_grid()
+
+save_plot("scratch/filter_pc1_pairplot.png", p9, bg = "white", base_width = 11, base_height = 10)
+```
+
+
+```{r}
+
+
+full_data_nolog <- concentrations %>%
+  mutate(Sample = as.character(Sample)) %>%
+  select(Sample, conc = low_bead_concentration_3, analyte) %>%
+  filter(!(analyte %in% analytes_to_remove)) %>%
+  pivot_wider(Sample, names_from = analyte, values_from = conc) %>%
+  left_join(csts)
+
+rec_wlog <- recipe(CST ~ ., data = full_data_nolog) %>%
+  step_log(base = 10) %>%
+  step_zv(all_numeric_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+rec %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  prep() %>%
+  bake(new_data = full_data) %>%
+  left_join(full_data_nolog) %>%
+  write_csv("scratch/PC_and_concentrations.csv")
+
+library(ggpubr)
+p11 <- concentrations %>%
+  mutate(Sample = as.character(Sample)) %>%
+  left_join(select(lactin_v_sample_map, Sample = SN, visit_number, treatment_group)) %>%
+  filter(visit_number != "01") %>%
+  filter(!(analyte %in% analytes_to_remove)) %>%
+  select(conc=low_bead_concentration_3, everything()) %>%
+  # mutate(conc = log10(conc)) %>%
+  left_join(csts) %>%
+  filter(!is.na(CST)) %>%
+  filter(visit_number == "00") %>%
+  ggplot(aes(x = treatment_group, y = conc)) +
+  geom_quasirandom(aes(color = CST), size = 0.75) +
+  geom_boxplot(fill = "#00000000", outlier.shape = NA) +
+  stat_compare_means(size = 2.75,
+                     vjust = -0.4,
+                     label = "p.format",
+                     hjust = 0.5,
+                     label.x.npc = "center") +
+  scale_color_manual(values = c("I" = "#E69F00", "III" = "#009E73", "IV-A" = "#0072B2", "IV-B" = "#0072B2", "IV-C" = "#0072B2", "V" = "#CC79A7")) +
+  facet_wrap(~analyte, scales = "free_y") +
+  scale_y_log10(expand = expansion(mult = c(0.1, 0.25)), labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  background_grid() +
+  ggtitle("Visit 00")
+
+  save_plot("scratch/treatment_concentrations_visit_00.png", p11, bg="white", base_width=12, base_height=12)
+```

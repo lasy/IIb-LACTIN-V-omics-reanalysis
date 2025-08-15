@@ -1,0 +1,1706 @@
+---
+title: "Estimating effect hererogeneity"
+author: Laura Symul
+date: today
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    toc-depth: 5
+    theme: journal
+    embed-resources: true
+execute:
+  cache: refresh # true refresh
+  warning: false
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(gt)
+library(phyloseq)
+library(PropCIs)
+library(geepack)
+
+# library(ggrepel)
+# library(ggcorrplot)
+# library(MBViz) # devtools::install_github("lasy/MBViz")
+# library(ggtext)
+# library(ade4)
+# library(packMBPLSDA)
+
+# library(grf)
+# library(policytree)
+# library(latex2exp)
+
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+```
+
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+theme_set(theme_publication())
+
+```
+
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(str_c(data_dir(), "03_augmented_mae/"))
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame() |> as_tibble()
+
+```
+
+
+```{r}
+
+target_visits <- c(4, 7)
+arms <- c("Placebo", "LACTIN-V")
+conf.level <- 0.95
+
+```
+
+# Introduction
+
+
+In this document, we investigate whether the effects of Lactin-V vary by baseline microbiota composition or participant's characteristics. The aim is to identify groups of participants that may benefit more than others, or to identify groups of participants that may be harmed by the product and for which caution should be taken in future trials.
+
+
+## Outcomes
+
+We consider the following binary outcomes ($Y$): 
+
+- *Lactobacillus crispatus* colonization (≥ 50% *L. crispatus*) at week 12 or at week 24 (the primary and secondary outcomes of this study), or
+
+- rBV by week 12 (any rBV before or at week 12) or by week 24 (the primary and secondary outcomes of the original Phase IIb study).
+
+
+
+
+```{r}
+
+Y_Lc <- 
+  get_assay_wide_format(mae, "mb_categories_wide") |> 
+  filter(AVISITN %in% target_visits, ARM %in% arms)  |> 
+  select(USUBJID, AVISITN, assay) |>
+  mutate(
+    week = ifelse(AVISITN == 4, 12, 24), 
+    Lc = assay$`≥ 50% L. crispatus`
+    ) |> 
+  pivot_wider(
+    id_cols = USUBJID, names_from = week, values_from = Lc, names_prefix = "Lc_week_"
+    ) |>
+  arrange(USUBJID)
+
+Y_rBV <- 
+  clin |> 
+  filter(ARM %in% arms, AVISITN > 1)  |> 
+  select(USUBJID, AVISITN, BV) |> 
+  arrange(USUBJID, AVISITN) |> 
+  distinct()
+
+Y_rBV <- 
+  Y_rBV |> 
+  full_join(
+    expand_grid(
+      USUBJID = Y_rBV$USUBJID |> unique(),
+      AVISITN = c(4,7)
+      ),
+    by = join_by(USUBJID, AVISITN)
+  ) |> 
+  mutate(BV = BV |> str_replace_na("Missing")) |> 
+  group_by(USUBJID) |> 
+  mutate(
+    n_rBV = cumsum(BV == "Yes"),
+    n_no_rBV = cumsum(BV == "No")
+  ) |> 
+  ungroup() |> 
+  filter(AVISITN %in% target_visits) |>
+  mutate(
+    rBV = 
+      case_when(
+        n_rBV > 0 ~ 1, # "rBV by" if any BV by this week
+        (n_rBV == 0) & (n_no_rBV > 0) ~ 0, # "no rBV by" if no BV and at least one observation until then.
+        TRUE ~ NA_integer_ # if no observation until then -> NA
+      ),
+    week = ifelse(AVISITN == 4, 12, 24)
+  ) |> 
+  pivot_wider(
+    id_cols = USUBJID, names_from = week, values_from = rBV, names_prefix = "rBV_week_"
+  )
+
+```
+
+
+```{r}
+
+Y <- full_join(Y_Lc, Y_rBV, by = join_by(USUBJID))
+rm(Y_Lc, Y_rBV)
+
+```
+
+
+```{r}
+
+Y |> 
+  pivot_longer(cols = -USUBJID, names_to = "outcome", values_to = "value") |>
+  dplyr::count(outcome, value) |>
+  pivot_wider(names_from = outcome, values_from = n, values_fill = 0) |>
+  dplyr::rename(outcome = value) |> 
+  mutate(outcome = outcome |> as.character() |> str_replace_na("Missing")) |> 
+  gt(caption = "Number of participants per outcome")
+
+```
+
+```{r}
+
+outcomes <- c("Lc_week_12", "Lc_week_24", "rBV_week_12", "rBV_week_24")
+
+```
+
+
+## Treatment
+
+The treatment ($A$) is LACTIN-V *vs.* placebo.
+
+```{r}
+
+A <- 
+  clin |> filter(ARM %in% arms) |> select(USUBJID, ARM) |> distinct() |> 
+  mutate(ARM = ARM |> fct_relevel(arms))
+AY <- full_join(A, Y, by = join_by(USUBJID))
+
+rm(A, Y)
+
+```
+
+The numbers of participant per considered outcomes in each arm are:
+
+```{r}
+
+AY |> 
+  pivot_longer(cols = -c(USUBJID, ARM), names_to = "outcome", values_to = "value") |>
+  mutate(outcome = outcome |> fct_inorder()) |> 
+  filter(!is.na(value)) |> 
+  dplyr::count(outcome, ARM) |> 
+  pivot_wider(names_from = ARM, values_from = n, names_prefix = "n ", values_fill = 0) |>
+  gt(caption = "Number of participants in each arm per considered outcomes.")
+
+
+```
+
+## Covariates
+
+The main objective of this analysis is to investigate if baseline microbiota is associated with differential benefit. 
+
+Here, we chose to represent baseline microbiota by the pre-MTZ topic composition (topic relative abundances) rather than all taxa or ASVs relative abundances to reduce the dimensionality of the data.
+
+Since most *Lactobacillus* species, with the exception of *L. iner*, have a very low prevalence at baseline,
+we collapsed *Lactobacillus*-dominated topics into a single topic (which includes all *Lactobacillus* spp.)
+
+In addition, since we consider relative abundances of topics, the proportion of any topic can be computed from the others, so we arbitrarily exclude one topic from the models so that no explanatory variable is a linear combination of the others. We chose to exclude the last one as it is the least prevalent.
+
+```{r}
+
+V_topics <-
+  get_assay_wide_format(mae, "c_topics_16S_8") |> 
+  filter(AVISITN == 0, ARM %in% arms)  |> 
+  dplyr::rename(topic = assay) |>
+  select(USUBJID, topic) |> 
+  mutate(
+    topic = topic |> set_colnames(SummarizedExperiment::rowData(mae[["c_topics_16S_8"]])$topic_label)
+  )
+
+if (any(duplicated(V_topics$USUBJID))) {
+  stop("Some participants have more than one topic composition at baseline")
+}
+
+
+V_microbiota <- 
+  V_topics |> 
+  select(USUBJID) |> 
+  mutate(
+    microbiota = 
+      bind_cols(
+        tibble(Lactobacillus = V_topics$topic |> select(1:4) |> rowSums()),
+        V_topics$topic |> select(-c(1:4, 8))
+      )
+  )
+
+```
+
+
+In addition to our primary covariates (pre-MTZ subcommunity proportions), we will also estimate effect heterogeneity by the following categorical covariates:
+
+- baseline (pre-MTZ) sub-CSTs (correlated with the subcommunities);
+
+- pre-MTZ $\alpha$-diversity (Shannon index);
+
+- post-MTZ BV diagnosis;
+
+- self-declared race; 
+
+- study site; and
+
+- contraceptive choices.
+
+
+```{r}
+
+
+V_most_prev_genus <- 
+  get_assay_long_format(mae, "tax_16S_p") |> 
+  filter(AVISITN == 0, ARM %in% arms)  |> 
+  select(USUBJID, feature, value) |> 
+  left_join(
+    SummarizedExperiment::rowData(mae[["tax_16S_p"]]) |> 
+      as.data.frame() |>
+      rownames_to_column("feature") |> 
+      as_tibble(),
+    by = join_by(feature)
+  ) |> 
+  group_by(USUBJID, Genus) |> 
+  summarize(rel_ab = sum(value), .groups = "drop") |> 
+  arrange(USUBJID, -rel_ab) |> 
+  group_by(USUBJID) |>
+  slice_head(n = 1) |> 
+  ungroup() |> 
+  dplyr::rename(most_prev_genus = Genus) |> 
+  arrange(-rel_ab) |>
+  mutate(most_prev_genus = most_prev_genus |> str_replace("Candidatus Lachnocurva", "Ca. Lachn. (BVAB1)") |> fct_inorder()) |> 
+  arrange(USUBJID) |> 
+  select(-rel_ab)
+
+
+V_shannon_taxa <- 
+  get_assay_wide_format(mae, "tax_16S_p") |> 
+  filter(AVISITN == 0, ARM %in% arms)  |> 
+  mutate(shannon_taxa = vegan::diversity(assay, index = "shannon")) |>
+  select(USUBJID, shannon_taxa) 
+
+V_microbiota <- 
+  V_microbiota |> 
+  mutate(
+    microbiota_with_div = 
+      microbiota |> mutate(`α-diversity` = V_shannon_taxa$shannon_taxa)
+  )
+
+V_subCST <-
+  get_assay_wide_format(mae, "CST") |> 
+  filter(AVISITN == 0, ARM %in% arms)  |> 
+  mutate(subCST = assay$subCST) |>
+  select(USUBJID, subCST) 
+
+if (any(duplicated(V_subCST$USUBJID))) {
+  stop("Some participants have more than one subCST at baseline")
+}
+
+V_race <- 
+  clin |> 
+  filter(ARM %in% arms) |> 
+  select(USUBJID, RACEGR2) |> 
+  dplyr::rename(Race = RACEGR2) |>
+  distinct()
+
+V_site <- 
+  clin |> 
+  filter(ARM %in% arms) |> 
+  select(USUBJID, SITENAME) |> 
+  dplyr::rename(Site = SITENAME) |>
+  distinct()
+
+
+V_contraception <- 
+  clin |> 
+  filter(ARM %in% arms) |> 
+  select(USUBJID, BC_W1_24) |> 
+  dplyr::rename(Contraceptive = BC_W1_24) |>
+  distinct()
+
+V_post_MTZ_BV <- 
+  clin |> 
+  filter(ARM %in% arms, AVISITN == 1) |> 
+  select(USUBJID, AMSEL, NUGENT) |> 
+  distinct() |> 
+  mutate(
+    AMSEL = AMSEL |> as.character() |> as.numeric(),
+    NUGENT = NUGENT |> as.character() |> as.numeric(),
+    amsel_imp = AMSEL |> replace_na(4),
+    nugent_imp = NUGENT |> replace_na(10),
+    post_MTZ_BV = (amsel_imp %in% c(3,4)) & (nugent_imp %in% c(7:10))
+    ) |> 
+  dplyr::rename(post_MTZ_Amsel = AMSEL, post_MTZ_Nugent = NUGENT) |> 
+  select(-amsel_imp, -nugent_imp)
+  
+```
+
+
+```{r}
+
+V <- 
+  V_microbiota |> 
+  full_join(V_topics, by = join_by(USUBJID)) |>
+  full_join(V_most_prev_genus, by = join_by(USUBJID)) |>
+  full_join(V_shannon_taxa, by = join_by(USUBJID)) |>
+  full_join(V_subCST, by = join_by(USUBJID)) |>
+  full_join(V_race, by = join_by(USUBJID)) |>
+  full_join(V_site, by = join_by(USUBJID)) |> 
+  full_join(V_contraception, by = join_by(USUBJID)) |> 
+  full_join(V_post_MTZ_BV, by = join_by(USUBJID)) 
+
+rm(V_topics, V_most_prev_genus, V_microbiota, V_shannon_taxa, V_subCST, V_race, V_site, V_contraception, V_post_MTZ_BV)
+
+```
+
+
+
+```{r}
+
+AYV <- full_join(AY, V, by = join_by(USUBJID))
+AYV <- AYV |> mutate(id = row_number())
+
+rm(AY, V)
+
+```
+
+
+
+# Estimating average causal effects
+
+Before investigating effect heterogeneity, we estimate the average causal effects of LACTIN-V on the outcomes of interests (basically replicating NEJM Table 2 and our paper Table 1 results).
+
+To estimate average causal effects (ignoring missing data), we compute risk (or benefit) ratio:
+
+$$\hat{RR} = \frac{\hat{P}(Y = 1 | A = 1)}{\hat{P}(Y = 1 | A = 0)}$$ (Null value = 1)
+
+We compute these using the `epitools::riskratio` function, which computes risk/benefit ratios, Wald's confidence intervals, and  $p$-values.
+
+
+```{r}
+# epitools::riskratio results are then formatted and displayed as a `gt` table using this function
+
+gt_RR_table <- function(res, outcome, title = NULL){
+  if (outcome |> str_detect("Lc")) {
+    new_rownames <- 
+      c(
+        str_c(c("< 50% L. crisp. at week "), parse_number(outcome)),
+        str_c(c("≥ 50% L. crisp. at week "), parse_number(outcome)),
+        "Total"
+      )
+  } else {
+    new_rownames <- 
+      c(
+        str_c(c("no rBV by week "), parse_number(outcome)),
+        str_c(c("rBV by week "), parse_number(outcome)),
+        "Total"
+      )
+  }
+    
+  res$data[1:2, ] |> 
+    t() |> 
+    set_rownames(new_rownames) |> 
+    as.data.frame() |> 
+    rownames_to_column("Outcome") |>
+    mutate(
+      RR = 
+        c(
+          str_c(
+            res$measure[2, 1] |> round(2), " (",
+            res$measure[2, 2] |> round(2), "–",
+            res$measure[2, 3] |> round(2), ")"
+          ), "",""
+        ),
+      `p-value` = 
+        c(
+          res$p.value[2, 1] |> format.pval(digits = 2),
+          "",""
+        )
+    )  |> 
+    gt() |> 
+    gt::cols_label(
+      RR = ifelse(str_detect(outcome, "Lc"), "Benefit Ratio & 95% CI", "Risk Ratio & 95% CI")
+    ) |> 
+    gt::tab_header(title = title)
+  
+}
+```
+
+
+## *L. crisp* colonization
+
+### Week 12
+
+
+
+```{r}
+
+Z <- qnorm(1 - (1 - conf.level)/2)
+
+table(AYV$ARM, AYV$Lc_week_12) |> 
+  epitools::riskratio() |> 
+  gt_RR_table("Lc_week_12", title = "Lactobacillus crispatus colonization at week 12")
+
+```
+
+
+```{r}
+
+# Seth values: 3.19 (1.32–7.70) for week 12
+# they are slightly different than mine
+# seth_w12 <- 
+#   matrix(c(51 , 88, 5, 35), 2, 2) |> 
+#   set_rownames(arms) |> 
+#   set_colnames(0:1)
+# seth_w12 |> epitools::riskratio() |> 
+#   gt_RR_table("Lc_week_12", title = "Lactobacillus crispatus colonization at week 12 (Seth's numbers)")
+# the same if I use his numbers
+
+```
+
+
+
+### Week 24
+
+```{r}
+
+table(AYV$ARM, AYV$Lc_week_24) |> 
+  epitools::riskratio() |> 
+  gt_RR_table("Lc_week_24", title = "Lactobacillus crispatus colonization at week 24")
+
+```
+
+```{r}
+
+# Seth values: 4.37 (1.64–11.61) for week 24
+# his numbers are slightly different than mine
+# seth_w24 <- 
+#   matrix(c(48 , 75, 4, 38), 2, 2) |> 
+#   set_rownames(arms) |> 
+#   set_colnames(0:1)
+# 
+# seth_w24 |> epitools::riskratio() |> 
+#   gt_RR_table("Lc_week_24", title = "Lactobacillus crispatus colonization at week 24 (Seth's numbers)")
+# the same if I use his numbers
+
+
+```
+
+
+
+
+## rBV
+
+### Week 12
+
+
+```{r}
+
+table(AYV$ARM, AYV$rBV_week_12) |> 
+  epitools::riskratio() |> 
+  gt_RR_table("rBV_week_12", title = "rBV by week 12")
+# NEJM values 0.66 (0.44–0.87)
+
+```
+
+The NRJM values are slightly different than what we have here because not all participants are included here (samples for some participants were not shipped for the re-analysis.
+
+```{r}
+
+nejm_data_summary <- 
+  tibble(
+    ARM = rep(arms, each = 3) |> factor(levels = arms),
+    rBV = rep(c("rBV", "no rBV", NA), 2),
+    n = c(34, 30, 12, 46, 87, 19)
+  )
+
+nejm_data <- nejm_data_summary[rep(1:6, nejm_data_summary$n), 1:2] 
+
+nejm_table <- table(nejm_data$ARM, nejm_data$rBV)
+
+epitools::riskratio(nejm_table) |> 
+  gt_RR_table("rBV_week_12", title = "rBV by week 12 (values from Cohen et al., NEJM)")
+
+# 0.6510394 (0.4689817 - 0.9037713)
+# NEJM values 0.66 (0.44–0.87) # differences likely comes from imputation for missing values
+
+```
+
+
+
+### Week 24
+
+```{r}
+
+table(AYV$ARM, AYV$rBV_week_24) |> 
+  epitools::riskratio() |> 
+  gt_RR_table("rBV_week_24", title = "rBV by week 24")
+
+```
+
+```{r}
+
+nejm_data_summary <- 
+  tibble(
+    ARM = rep(arms, each = 3) |> factor(levels = arms),
+    rBV = rep(c("rBV", "no rBV", NA), 2),
+    n = c(41, 21, 14, 59, 63, 30)
+  )
+
+nejm_data <- nejm_data_summary[rep(1:6, nejm_data_summary$n), 1:2] 
+
+nejm_table <- table(nejm_data$ARM, nejm_data$rBV)
+
+epitools::riskratio(nejm_table) |> 
+  gt_RR_table("rBV_week_24", title = "rBV by week 24 (values from Cohen et al., NEJM)")
+# 0.6510394 (0.4689817 - 0.9037713)
+# NEJM values 0.66 (0.44–0.87) # differences likely comes from imputation for missing values
+
+```
+
+
+# Effect heterogeneity by pre-MTZ microbiota
+
+## Observed data
+
+```{r}
+
+topics_long <- 
+  AYV |> 
+  select(USUBJID, topic, most_prev_genus) |> 
+  unnest(topic) |>
+  pivot_longer(cols = -c(USUBJID, most_prev_genus), names_to = "topic", values_to = "prop") |>
+  # arrange(most_prev_genus, -prop) |> 
+  mutate(topic = topic |> fct_inorder() |> fct_relevel("Ca. L. v. (BVAB1) topic", after = Inf))
+
+```
+
+```{r}
+
+topics_long_ordered <- 
+  topics_long |> 
+  filter(!is.na(prop)) |> 
+  left_join(
+    AYV |> select(USUBJID, ARM),
+    by = join_by(USUBJID)
+  ) |> 
+  arrange(USUBJID, -prop) |> 
+  group_by(USUBJID) |> 
+  mutate(
+    dominant_topic = topic[1],
+    prop_dom = prop[1],
+    order = weighted.mean(prop, topic |> as.integer())
+  ) |> 
+  ungroup() |> 
+ #  arrange(dominant_topic, order) |> 
+  arrange(most_prev_genus, order) |> 
+  mutate(USUBJID = USUBJID |> fct_inorder())
+
+```
+
+```{r}
+
+outcomes_ordered_filtered <- 
+ AYV |> 
+  filter(USUBJID %in% topics_long_ordered$USUBJID) |> 
+  mutate(
+    USUBJID = USUBJID |> factor(levels = levels(topics_long_ordered$USUBJID))
+  ) |> 
+  select(USUBJID, ARM, contains("_week_")) |> 
+  pivot_longer(cols = contains("_week_"), names_to = "outcome", values_to = "value") |> 
+  mutate(
+    Outcome = ifelse(str_detect(outcome, "Lc"), "≥50%\nL.c.", "rBV"),
+    week = str_c(
+      ifelse(str_detect(outcome, "Lc"), "at W", "by W"),
+      outcome |> parse_number()
+    ) |> fct_inorder(),
+    value = value |> factor()
+  ) |> 
+  group_by(USUBJID) |> 
+  mutate(has_some_obs = !all(is.na(value))) |> 
+  ungroup() |> 
+  filter(has_some_obs)
+
+```
+
+```{r}
+topics_long_ordered_filtered <- 
+  topics_long_ordered |> 
+  filter(USUBJID %in% outcomes_ordered_filtered$USUBJID)
+```
+
+
+
+
+```{r}
+
+g_observed_topics <- 
+  ggplot(topics_long_ordered_filtered) +
+  aes(x = USUBJID, y = prop, fill = topic) +
+  geom_col() +
+  facet_grid(. ~ ARM, scales = "free_x", space = "free_x") +
+  scale_y_continuous("Pre-MTZ rel. ab.", labels = scales::label_percent()) +
+  scale_fill_manual(
+    "Taxon or Topic", 
+    values = get_topic_colors(topics_long$topic |> levels()),
+    guide = guide_legend(direction = "vertical")
+    ) +
+  scale_x_discrete(
+    "Participants, ordered by most prevalent genus and similarity in topic composition", 
+    breaks = NULL
+    ) +
+  theme(
+    legend.position = "right"
+  )
+
+# g_observed_topics
+
+```
+
+
+```{r}
+
+g_observed_outcomes <- 
+  ggplot(outcomes_ordered_filtered) +
+  aes(x = USUBJID, y = week |> fct_rev(), fill = Outcome, alpha = value) +
+  geom_tile() +
+  facet_grid(Outcome ~ ARM, scales = "free", space = "free") +
+  scale_fill_manual(
+    "Outcome", 
+    values = get_topic_colors(c("I","IV")),
+    guide = guide_legend(direction = "vertical")
+    ) +
+  scale_x_discrete("", breaks = NULL) +
+  scale_alpha_manual(
+    "Obs.", values = c(0.2, 1), breaks = c(0, 1),
+    labels = c("No", "Yes"),
+    guide = guide_legend(direction = "vertical"),
+    na.value = 0
+    ) +
+  ylab("") +
+  theme(
+    legend.position = "right"# , strip.text.y = element_text(angle = -90, hjust = 0.5)
+  )
+
+# g_observed_outcomes
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3.5
+
+(g_observed_outcomes + theme(strip.text.y = element_blank())) +
+  (g_observed_topics + theme(strip.text.x = element_blank())) +
+  plot_layout(ncol = 1, height = c(1, 2), guides = "collect") & 
+  theme(legend.position = "right")
+
+```
+
+
+
+
+```{r}
+
+g_observed_topics_incl <- 
+  topics_long_ordered_filtered |> 
+  filter(most_prev_genus != "Sneathia", most_prev_genus != "Fannyhessea") |>
+  arrange(most_prev_genus) |> 
+  mutate(mpg = most_prev_genus |> str_replace("actobacillus", "\\.") |> str_replace("Ca. Lachn. \\(BVAB1\\)", "BVAB1") |>  fct_inorder()) |>
+  ggplot() +
+  aes(x = USUBJID, y = prop, fill = topic) +
+  geom_col() +
+  ggh4x::facet_nested(. ~ ARM + mpg, scales = "free_x", space = "free_x") +
+  scale_y_continuous("Pre-MTZ rel. ab.", labels = scales::label_percent()) +
+  scale_fill_manual(
+    "Taxon or Topic", 
+    values = get_topic_colors(topics_long$topic |> levels()),
+    guide = guide_legend(direction = "vertical")
+    ) +
+  scale_x_discrete(
+    "Participants, ordered by most prevalent genus and similarity in topic composition", 
+    breaks = NULL
+    ) +
+  theme(
+    legend.position = "right"
+  )
+
+# g_observed_topics
+
+```
+
+
+```{r}
+
+g_observed_outcomes_incl <-
+  outcomes_ordered_filtered |> 
+  left_join(topics_long_ordered_filtered |> select(USUBJID, most_prev_genus) |> distinct(), by = "USUBJID") |>
+  filter(most_prev_genus != "Sneathia", most_prev_genus != "Fannyhessea") |> 
+  arrange(most_prev_genus) |> 
+  mutate(mpg = most_prev_genus |> str_replace("actobacillus", "\\.") |> str_replace("Ca. Lachn. \\(BVAB1\\)", "BVAB1") |>  fct_inorder()) |>
+  ggplot() +
+  aes(x = USUBJID, y = week |> fct_rev(), fill = Outcome, alpha = value) +
+  geom_tile() +
+  ggh4x::facet_nested(Outcome ~ ARM + mpg, scales = "free", space = "free") +
+  scale_fill_manual(
+    "Outcome", 
+    values = get_topic_colors(c("I","IV")),
+    guide = guide_legend(direction = "vertical")
+    ) +
+  scale_x_discrete("", breaks = NULL) +
+  scale_alpha_manual(
+    "Obs.", values = c(0.2, 1), breaks = c(0, 1),
+    labels = c("No", "Yes"),
+    guide = guide_legend(direction = "vertical"),
+    na.value = 0
+    ) +
+  ylab("") +
+  theme(
+    legend.position = "right"# , strip.text.y = element_text(angle = -90, hjust = 0.5)
+  )
+
+# g_observed_outcomes
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3.5
+
+(g_observed_outcomes_incl + theme(strip.text.y = element_blank())) +
+  (g_observed_topics_incl + theme(strip.text.x = element_blank())) +
+  plot_layout(ncol = 1, height = c(1, 2), guides = "collect") & 
+  theme(legend.position = "right")
+
+```
+
+
+
+## Testing for heterogeneity of effects
+
+To test for heterogeneity of effects, we fit two logistic regression models with the outcome as the response variable.
+
+$$
+y_i \sim \text{Bern}(p_i)
+$$
+
+$$ 
+p_i = \text{logistic}(\mu_i)
+$$
+
+- The null model ($m_0$), corresponding to assuming no effect heterogeneity, solely includes the treatment arm as the only explanatory variable:
+
+$$
+m_0: \mu_i = \beta_0 + \beta_1 A_i
+$$
+
+Where $A_i$ is the treatment arm of participant $i$ (0 = Placebo, 1 = Lactin-V).
+
+- The "full" model ($m_1$), which allows for effect heterogeneity, includes the treatment arm and the microbiota composition variables as explanatory variables. In the full model, terms representing the interactions between arm and each of the microbiota composition variables are included.
+
+
+$$
+m_1: \mu_i = \beta_0 + \beta_1 A_i + \sum_k\beta_{2k} V_{ki} + \sum_k\beta_{3k} A_i V_{ki} = f_1(A, \mathbf{V})
+$$
+
+Where $V_{ki}$ is the $k$-th microbiota composition variable for participant $i$ (can be categorical for a "stratification analysis" or continuous, assuming a linear model is biologically relevant).
+
+Note: Since we observed overdispersion in our data, we fit the models using the `quasibinomial` (instead of the `binomial`) family to estimate the deviance and standard errors more robustly.
+
+Prior to the fits, participants for which the data for the outcome ($Y$), or the microbiota composition ($\mathbf{V}$) are missing are excluded for both fits, so that  the null and the full models are fitted on the same data.
+
+Heterogeneity of effects is tested by comparing the full model ($m_1$) to the null model ($m_0$) using an analysis of deviance $F$ test (given the overdispersion).
+
+```{r}
+
+glm_family <- "quasibinomial"
+test_deviance <- "F" # change to LRT if the binomial family is used
+
+```
+
+This is implemented in the `fit_outcome_prediction_models` function.
+
+```{r}
+#| collapse: true
+
+fit_outcome_prediction_models
+
+```
+
+
+## Heterogeneity by most prevalent genus at the pre-MTZ visit
+
+```{r}
+
+
+AYV |> filter(!is.na(most_prev_genus)) |> dplyr::count(most_prev_genus, ARM) |> gt(
+  caption = "Number of participants per most prevalent genus at the pre-MTZ visit"
+  )
+
+```
+
+
+Strata with less than 2 participants per arm are excluded from the analysis.
+
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+
+plot_stratified_risks(AYV |> filter(!(most_prev_genus %in% c("Sneathia", "Fannyhessea"))), outcomes, strata = "most_prev_genus", min_n_in_each_arm = 2) +
+  plot_stratified_differences(AYV |> filter(!(most_prev_genus %in% c("Sneathia", "Fannyhessea"))), outcomes, strata = "most_prev_genus", min_n_in_each_arm = 2) +
+  plot_layout(ncol = 1) &
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+```
+
+```{r}
+
+models_most_prevalent_genus <-
+  map(
+    outcomes,
+    ~ fit_outcome_prediction_models(
+      AYV |> filter(!is.na(most_prev_genus), !(most_prev_genus %in% c("Sneathia", "Fannyhessea"))), 
+      outcome = .x, covariate = "most_prev_genus", 
+      model = "glm", family = glm_family, test_deviance = test_deviance
+    )
+  ) 
+
+models_most_prevalent_genus |> 
+  map(
+    ~ tibble(
+      outcome = .x$outcome,
+      `p-value` = .x$heterogeneity_test$Pr[2]
+    )
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    `BH adjusted p-value` = p.adjust(`p-value`, method = "BH") |> format.pval(digits = 2),
+    `BY adjusted p-value` = p.adjust(`p-value`, method = "BY") |> format.pval(digits = 2),
+    `p-value` = `p-value` |> format.pval(digits = 2)
+  ) |> gt(
+    caption = "Test for heterogeneity of treatment effects by pre-MTZ most prevalent genus"
+  ) 
+
+```
+
+## Heterogeneity by pre-MTZ subCSTs
+
+```{r}
+
+AYV |> dplyr::count(subCST, ARM) |> gt(
+  caption = "Number of participants per subCST at the pre-MTZ visit"
+  )
+
+```
+
+Categories with less than 2 participants per arm are excluded from the analysis.
+
+
+```{r}
+
+models_csts <-
+  map(
+    outcomes,
+    ~ fit_outcome_prediction_models(
+      AYV |> filter(subCST %in% c("IV-A", "IV-B")), 
+      outcome = .x, covariate = "subCST",
+      model = "glm", family = glm_family, test_deviance = test_deviance
+    )
+  ) 
+
+pvals_csts <- 
+  models_csts |> 
+  map(
+    ~ tibble(
+      outcome = .x$outcome,
+      `p-value` = .x$heterogeneity_test$Pr[2]
+    )
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    `BH adjusted p-value` = p.adjust(`p-value`, method = "BH") |> scales::pvalue(accuracy = 0.01),
+    `BY adjusted p-value` = p.adjust(`p-value`, method = "BY") |> scales::pvalue(accuracy = 0.01),
+    `p-value` = `p-value` |> format.pval(digits = 2)
+  ) 
+
+pvals_csts |> gt(
+    caption = "Test for heterogeneity of treatment effects by pre-MTZ subCSTs"
+  ) 
+
+```
+
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+
+g <- 
+plot_stratified_risks(AYV, outcomes, strata = "subCST", min_n_in_each_arm = 2) +
+  plot_stratified_differences(AYV, outcomes, strata = "subCST", min_n_in_each_arm = 2) +
+  xlab("CST") +
+  geom_label(
+    data = 
+      pvals_csts |> 
+      mutate(
+        outcome_label = 
+          outcome |> 
+          str_replace("Lc_", "≥50% L. crisp. at ") |> 
+          str_replace("rBV_", "any rBV by ") |> 
+          str_replace("week_", "week ") 
+      ), 
+    aes(label = str_c("adj. p: ", `BH adjusted p-value`)),
+    x = -Inf, y = -Inf, hjust = -0.1, vjust = -0.5, color = "black", size = 3, label.size = 0
+  ) +
+
+  plot_layout(ncol = 1) 
+
+g
+  
+```
+
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S5.pdf"), width = 10, height = 6, device = cairo_pdf)
+
+```
+
+
+
+
+## Heterogeneity by pre-MTZ microbiota composition (subcommunity relative abundances)
+
+
+### Checking the overlap in the pre-MTZ microbiota composition distribution between the two arms
+
+Before trying to estimate whether there is any heterogeneity in effects by pre-MTZ microbiota composition as expressed as subcommunity relative abundances, we can check whether the distribution of the pre-MTZ microbiota composition is similar between the two arms. If the overlap in distribution is too low, then our downstream analyses will be dubious.
+
+To do so, we estimate propensity scores (the probability for each baseline microbiota composition to be in the treatment (Lactin-V) arm), using a logistic regression model where the response is the treatment arm and the explanatory variable is the pre-MTZ microbiota composition.
+
+```{r}
+
+# This is done selecting microbiota and arm, making arm a binary variable (1 = Lactin-V, 0 = Placebo), and excluding any participants for whom the arm or the baseline microbiota would be unknown.
+
+formated_data <- 
+  AYV |>
+  select(USUBJID, ARM, microbiota) |>
+  unnest(cols = microbiota, names_sep = "_") |> 
+  mutate(arm = (ARM != "Placebo")*1) |> 
+  drop_na() 
+
+propensity_scores_model <- 
+  glm(arm ~ ., data = formated_data |> select(-USUBJID, -ARM), family = binomial())
+  
+propensity_scores <- 
+  formated_data |> 
+  mutate(
+    propensity_score = predict(propensity_scores_model, type = "response")
+  ) 
+
+```
+
+```{r}
+#| fig-height: 4
+
+propensity_scores |> 
+  ggplot(aes(x = propensity_score, fill = ARM)) + 
+  geom_histogram(binwidth = 0.01) +
+  geom_vline(xintercept = 2/3, linetype = "dashed", alpha = 0.5) +
+  facet_grid(ARM ~ .) +
+  xlab("Propensity score") +
+  scale_fill_manual("Treatment arm", values = get_arm_colors()) +
+  labs(caption = "The dashed vertical line corresponds to the 2:1 randomization ratio")
+
+```
+
+Overall, the overlap seems to be sufficient, but a few participants are over-represented in the treatment arm and two in the Placebo arm.
+
+```{r}
+
+topics_long_with_ps <- 
+  topics_long  |> 
+  left_join(propensity_scores |> select(USUBJID, ARM, propensity_score), by = join_by(USUBJID)) |> 
+  arrange(propensity_score) |> 
+  mutate(USUBJID = USUBJID |> fct_inorder()) |> 
+  filter(!is.na(ARM))
+
+```
+
+
+```{r}
+
+g_baseline <- 
+  topics_long_with_ps |> 
+  ggplot(aes(x = USUBJID, y = prop, fill = topic)) + 
+  geom_col() +
+  scale_fill_manual(
+    "Taxon or topic",
+    values = get_topic_colors(levels(topics_long_with_ps$topic)),
+    guide = guide_legend(direction = "vertical", ncol = 1)
+    )  +
+  scale_x_discrete("") +
+  scale_y_continuous("Relative\nabundance") +
+  theme(axis.text.x = element_blank())
+
+prop_score_limits <- 2/3 * c(0.85, 1, 1/0.85)
+
+g_prop <- 
+  topics_long_with_ps |> 
+  ggplot(aes(x = USUBJID, y = propensity_score, col = propensity_score)) +
+  geom_hline(yintercept = prop_score_limits, linetype = "dashed", alpha = 0.5) +
+  annotate(
+    "text", x = Inf, y = prop_score_limits[2], label = "2:1 randomization ratio", 
+    hjust = 1.05, vjust = -0.7, size = 3
+  ) +
+  geom_point(size = 0.5) +
+  scale_color_gradient2(
+    "Propensity\nscores",
+    low = "purple", mid = "steelblue2", high = "red", 
+    midpoint = 2/3, limits = c(1/3, 1), breaks = seq(0, 1, by = 0.5),
+    guide = guide_colourbar(direction = "vertical")
+    ) +
+  ylab("Propensity\nscores") +
+  scale_x_discrete("") +
+  theme(axis.text.x = element_blank())
+
+g_arm <- 
+  topics_long_with_ps |> 
+  ggplot(aes(x = USUBJID, y = 1, fill = ARM)) +
+  geom_tile() +
+  scale_y_continuous("\nArm", breaks = NULL) +
+  scale_fill_manual("Arm", values = get_arm_colors(), guide = guide_legend(direction = "vertical")) +
+  theme(axis.text.x = element_blank())
+
+```
+
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+#| warning: false
+
+g_arm + xlab("") +
+  g_prop +
+  g_baseline + 
+  g_arm + xlab("Participants") +
+  plot_layout(heights = c(1, 2, 4, 1)) &
+  theme(legend.position = "right")
+
+```
+
+Some microbiota compositions (such as *L. iners*-dominant ones) are under-represented, but they also have higher propensity scores, indicating that they are more common in the Lactin-V arm than in the Placebo arm.
+
+This imbalance might be further exacerbated when fitting the models as some participants will be excluded due to missing values at the endpoint visits (week 12 or week 24). The `fit_outcome_prediction_models` function allows to use inverse propensity score weighting to account for this imbalance when fitting the models if desired. However, as this can also introduce biases, we do not use it here.
+
+If there is heterogeneity in effects, we then use the full model predictions to identify subgroups of participants that may benefit more or less from the treatment based on their pre-MTZ microbiota composition (or any other variable we may be interested in checking for heterogeneity).
+
+To do that, we use counterfactual predictions: for all participants for which pre-MTZ microbiota composition is available (even if their outcome is missing), we predict, using the full model, the probabilities (and associated confidence intervals) of their outcome under the treatment ($\hat{p}_i^{(1)}$) or the placebo ($\hat{p}_i^{(0)}$). We can also compute the log(odds) (and associated confidence intervals) of these probabilities ($\hat{o}_i^{(1)}$ and $\hat{o}_i^{(0)}$), which are the linear predictors of the model under the treatment ($\hat{\mu}_i^{(1)} = \hat{f}_1(A = 1, \mathbf{V})$) and placebo arm ($\hat{\mu}_i^{(0)} = \hat{f}_1(A = 0, \mathbf{V})$).
+
+
+We then estimate the "unit-level" log(Odd Ratio) for each participant ($\log(\hat{\text{OR}}_i)$), and associated confidence intervals. 
+The participant-level predicted log(Odd Ratios) are computed as $\log(\hat{\text{OR}}_i) = \log\left(\frac{\hat{o}_i^{(1)}}{\hat{o}_i^{(0)}}\right) = \log(\hat{o}_i^{(1)}) - \log(\hat{o}_i^{(0)}) = \hat{\mu}_i^{(1)} - \hat{\mu}_i^{(0)} = \hat{\Delta}_{\mu_i}$.
+
+Confidence intervals for these participant-level predicted log(Odd Ratios) are computed using the `marginaleffects::comparisons` function.
+
+
+```{r}
+citation("marginaleffects")
+```
+> TODO: format citation
+
+These participant-level predicted log(Odd Ratios) reflect the predicted effect of the treatment for that participant. If their confidence interval includes 0, this participant is predicted to neither benefit nor be harmed by the treatment. If the confidence interval is entirely above 0, the participant is predicted to benefit from the treatment (if the outcome is a positive outcome such as colonization by *L. crispatus*), and if it is entirely below 0, the participant is predicted to be harmed by the treatment.
+
+This is implemented in the `predict_counterfactuals` function.
+
+```{r}
+#| collapse: true
+
+predict_counterfactuals
+
+```
+
+
+### Results
+
+#### Tests for heterogeneity
+
+```{r}
+
+prediction_models <- 
+  outcomes |> 
+  map(
+    ~ fit_outcome_prediction_models(
+      AYV, outcome = .x, covariate = "microbiota", family = glm_family, test_deviance = test_deviance
+    )
+  ) |> 
+  set_names(outcomes)
+
+```
+
+
+```{r}
+
+test_results <- 
+  prediction_models |> 
+  map(
+    ~ tibble(
+      outcome = .x$outcome,
+      `p-value` = .x$heterogeneity_test$Pr[2]
+      )
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    `BH adjusted p-value` = p.adjust(`p-value`, method = "BH") |> format.pval(digits = 2),
+    `p-value` = `p-value` |> format.pval(digits = 2)
+  )
+
+test_results |> gt(
+  caption = "Test for heterogeneity of treatment effects by pre-MTZ microbiota composition"
+) 
+
+```
+
+These results suggest an absence of effect heterogeneity when considering *L. crispatus* colonization at week 12 as the outcome, and a significant heterogeneity in treatment effects when considering the other outcomes.
+
+#### Estimated unit-level conditional treatment effects
+
+We next visualize the unit-level conditional treatment effects.
+
+```{r}
+#| warning: false
+
+counterfactuals_list <- 
+  prediction_models |> 
+  map(
+    ~ predict_counterfactuals(.x)
+  ) |> 
+  set_names(outcomes)
+
+```
+
+First we visualize these with participants ordered by their predicted log(OR):
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+#| warning: false
+
+
+map2(
+  .x = counterfactuals_list,
+  .y = prediction_models,
+  ~ plot_counterfactuals(
+    counterfactuals = .x, 
+    models = .y
+  )
+)
+
+```
+Next, we propose these visualization, ordering participants by their predicted probability of "success" in the Placebo arm and faceted by arm:
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+#| warning: false
+
+map2(
+  .x = counterfactuals_list,
+  .y = prediction_models,
+  ~ plot_counterfactuals(
+    counterfactuals = .x, 
+    models = .y,
+    order_by = "p_hat",
+    facet_by = "ARM"
+  )
+)
+
+```
+
+These results show that 
+
+- "Individually", no participant is predicted to significantly benefit or be harmed by the treatment since all confidence intervals include 0.
+
+- participants with high pre-MTZ proportions of the topic dominated by *P. amnii* are predicted to benefit the most from the treatment, regardless of the considered outcome because for these participants, their probability of colonizing with *L. c.* or not having rBV is highly increased in the Lactin-V arm.
+
+- participants with high pre-MTZ proportions of *Lactobacillus* are predicted to benefit from Lactin-V when considering *L. crispatus* colonization as outcome, but not when considering rBV as outcome. This is likely because these participants are unlikely to have BV again if they started with high proportions of *Lactobacillus.*
+
+- participants with high pre-MTZ proportions of topic dominated by BVAB1 are predicted to benefit least from the treatment, regardless of the considered outcome.
+
+
+Summarizing these results into a single figure and ordering participants by their predicted effects combined across outcomes, three groups of participants emerge:
+
+```{r}
+
+combined_predicted_effects <- 
+  counterfactuals_list |> 
+  map(
+    ~ .x$long_res |> 
+      filter(type == "actual") |> 
+      select(USUBJID, ARM, delta_p, delta_mu, delta_mu_CI_low, delta_mu_CI_high)
+  ) |> 
+  bind_rows(.id = "outcome") |> 
+  mutate(
+    estimated_benefit_difference = ifelse(str_detect(outcome, "Lc"), delta_p, -delta_p),
+    Outcome = outcome |> str_remove("_week_[0-9]*") |> str_replace("Lc", "≥ 50%\nL. c."),
+    week = 
+      str_c(
+        ifelse(str_detect(outcome, "rBV"), "by", "at"), 
+        " W", outcome |> parse_number()
+      ) |> fct_inorder()
+  ) 
+
+```
+
+
+```{r}
+
+
+participant_order <- 
+  combined_predicted_effects |> 
+  mutate(
+    outcome_type = ifelse(str_detect(outcome, "Lc"), "Lc", "rBV"),
+  ) |> 
+  group_by(USUBJID, outcome_type) |>
+  summarize(mean_benefit = mean(estimated_benefit_difference, na.rm = TRUE), .groups = "drop")  |> 
+  group_by(USUBJID) |> 
+  summarize(
+    max_mean_benefit = max(mean_benefit, na.rm = TRUE),
+    min_mean_benefit = min(mean_benefit, na.rm = TRUE),
+    mean_mean_benefit = mean(mean_benefit, na.rm = TRUE),
+    group =
+      case_when(
+        min_mean_benefit > 0 ~ "G1",
+        (max_mean_benefit > 0) & (abs(min_mean_benefit) < max_mean_benefit/2) ~ "G3", # (abs(diff_mean_benefit) > max_mean_benefit) & 
+        TRUE  ~ "G2",
+      ) |> factor()
+  ) |> 
+  arrange(group, -mean_mean_benefit) |> 
+  mutate(USUBJID = USUBJID |> fct_inorder())
+
+
+```
+
+
+```{r}
+
+benefit_range <- 
+  combined_predicted_effects$estimated_benefit_difference |> 
+  abs() |> max() |> round(1) |> add(0.1)
+
+g_effects <- 
+  combined_predicted_effects |>
+  mutate(USUBJID = USUBJID |> factor(levels = levels(participant_order$USUBJID))) |>
+  left_join(
+    participant_order, 
+    by = join_by(USUBJID)
+  ) |>
+  ggplot() +
+  aes(x = USUBJID, y = week |> fct_rev(), fill = estimated_benefit_difference) +
+  geom_tile() +
+  facet_grid(Outcome ~ group, scale = "free", space = "free_x") +
+  scale_fill_gradient2(
+    "Point-predicted\nbenefit",
+    low = "coral", mid = "white", high = "steelblue1", 
+    midpoint = 0, limits = c(-benefit_range, benefit_range), breaks = c(-benefit_range, 0, benefit_range),
+    guide = guide_colourbar(direction = "vertical")
+  ) +
+  ylab("") +
+  scale_x_discrete("", breaks = NULL) +
+  theme(legend.position = "right") 
+
+```
+
+```{r}
+
+g_comp <- 
+  topics_long |> 
+  filter(USUBJID %in% participant_order$USUBJID) |>
+  mutate(USUBJID = USUBJID |> factor(levels = levels(participant_order$USUBJID))) |>
+  left_join(
+    participant_order |> select(USUBJID, group), 
+    by = join_by(USUBJID)
+  ) |>
+  ggplot() +
+  aes(x = USUBJID, y = prop, fill = topic) +
+  geom_col() +
+  facet_grid(. ~ group, scale = "free_x", space = "free_x") +
+  scale_fill_manual(
+    "Taxon or topic",
+    values = get_topic_colors(levels(topics_long$topic)),
+    guide = guide_legend(direction = "vertical", ncol = 1)
+  ) +
+  scale_x_discrete("Participants, ordered by average effects within groups", breaks = NULL) +
+  scale_y_continuous("Pre-MTZ rel. ab.", expand = expansion(add = 0)) +
+  theme(legend.position = "right")
+
+
+```
+
+
+```{r}
+#| fig-height: 4
+#| fig-width: 11
+
+g_effects + 
+  (g_comp + theme(strip.text.x = element_blank())) + 
+  plot_layout(heights = c(1, 2.5), ncol = 1)
+
+```
+
+In the figure above, the "point-predicted benefits" (colors of upper panels) are the estimated differences in the probabilities of the outcomes (*e.g.*, *L. crispatus* colonization, or absence of rBV) between the Lactin-V and Placebo arms for each participant, with the colors indicating whether the participant is point-predicted to benefit (blue), be harmed (red), or neither (white).
+
+
+The participants are ordered by their average point-predicted benefit across outcomes, and grouped into three groups:
+
+- G1, where the average point estimated benefit is positive for both outcomes (*L. crispatus* colonization, and absence of rBV);
+- G2, where the average point estimated benefit is strongly negative for at least one outcome;
+- G3, where the average point estimated benefit is positive for one outcome (*L. crispatus* colonization), but very weakly negative for the other (rBV).
+
+
+Consistent with the stratified analysis where no participant was (individually or as a group) predicted to be harmed (all confidence intervals include 0), the point estimates of the predicted log(OR) suggest that some participants (*e.g.*, those with high pre-MTZ BVAB1 proportions) benefit less than their counterpart.
+
+
+
+# Summarizing main figure
+
+```{r}
+pvals <- 
+  models_most_prevalent_genus |> 
+  map(
+    ~ tibble(
+      outcome = .x$outcome,
+      `p-value` = .x$heterogeneity_test$Pr[2]
+    )
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    `BH adjusted p-value` = p.adjust(`p-value`, method = "BH") |> scales::pvalue(accuracy = 0.01),
+    `BY adjusted p-value` = p.adjust(`p-value`, method = "BY") |> format.pval(digits = 2),
+    `p-value` = `p-value` |> format.pval(digits = 2),
+    outcome_label = 
+      outcome |> 
+      str_replace("Lc_", "≥50% L. crisp. at ") |> 
+      str_replace("rBV_", "any rBV by ") |> 
+      str_replace("week_", "week ") 
+  ) 
+```
+
+
+
+```{r}
+
+g_strat_LC <- 
+  (
+      (
+        plot_stratified_risks(AYV, outcomes[1:2], strata = "most_prev_genus", min_n_in_each_arm = 2) +
+          guides(col = "none") 
+        ) /
+        (
+        plot_stratified_differences(AYV, outcomes[1:2], strata = "most_prev_genus", min_n_in_each_arm = 2) +
+         guides(col = "none") +
+          geom_label(
+            data = pvals |> filter(outcome == outcomes[1:2]), 
+            aes(label = str_c("adj. p: ", `BH adjusted p-value`)),
+            x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, color = "black", size = 3, label.size = 0
+            )
+        )
+    )
+
+
+g_strat_rBV <- 
+  (
+      (
+        plot_stratified_risks(AYV, outcomes[3:4], strata = "most_prev_genus", min_n_in_each_arm = 2) 
+        ) /
+        (
+        plot_stratified_differences(AYV, outcomes[3:4], strata = "most_prev_genus", min_n_in_each_arm = 2) +
+          geom_label(
+            data = pvals |> filter(outcome == outcomes[3:4]), 
+            aes(label = str_c("adj. p: ", `BH adjusted p-value`)),
+            x = Inf, y = -Inf, hjust = 1.1, vjust = -0.1, color = "black", size = 3, label.size = 0
+            )
+        )
+    ) 
+
+
+```
+
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 11
+#| cache: false
+
+
+fig_5 <- 
+# observed data
+(
+  (g_observed_outcomes_incl + guides(fill = "none")) /
+    (g_observed_topics_incl + theme(strip.text.x = element_blank())) 
+) /
+  
+  plot_spacer() /
+  
+  # stratified analysis
+  
+  ( 
+    (g_strat_LC | g_strat_rBV) + plot_layout(ncol = 2) & theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ) +
+  
+  # assembly
+  plot_annotation(tag_levels = "A") +
+  plot_layout(nrow = 5, heights = c(1, 2.5, 0.5, 5.5)) & 
+  theme(legend.position = "right") 
+
+fig_5
+
+```
+
+```{r}
+#| cache: false
+
+ggsave(fig_5, filename = str_c(fig_out_dir(), "Fig5.pdf"), width = 13, height = 11, device = cairo_pdf)
+
+```
+
+
+
+
+<small>
+
+(a) Observed primary and secondary outcomes. Each rectangle's shade indicates the observed outcome (light color for a negative outcome, dark color for a positive outcome, orange hue for *L. crispatus* colonization, and blue hue for rBV) at both endpoints (week 12, and 24, y-axis) for each participant (x-axis), ordered by dominant subcommunity and microbiota similarity as in panel (b) in both study arms (horizontal panels). 
+
+(b) Observed pre-MTZ microbiota composition in terms of relative abundance (y-axis) of each topic (colors). 
+
+(c) Rates and associated 95% CI of *L. crispatus* colonization (≥50% of relative abundance) (y-axis) at week 12 or 24 (horizontal panels) by pre-MTZ microbiota composition categorized in dominant sub-community (x-axis) in each arm (colors). CI are computed using Wilson's scores given the low sample sizes in some strata.
+
+(d) Rate differences and associated 95% CI between arms (y-axis) for *L. crispatus* colonization by pre-MTZ microbiota composition categorized in dominant sub-community (x-axis). CI are computed using Wilson's score method given the low sample sizes in some strata. Color indicate benefit, defined as rate differences (rate in Lactin-V arm - rate in Placebo arm).
+
+(e) Same as (c) but for rBV by week 12 or 24.
+
+(f) Same (d) but for rBV by week 12 or 24. Here, benefit is defined as the opposite rate difference (rate in Placebo arm - rate in Lactin-V arm).
+
+\small
+
+
+# Supplementary analyses: Effect heterogeneity for predefined categories
+
+
+## Race
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+
+map(
+  outcomes,
+  ~ plot_risks(
+    AYV, 
+    outcome = .x, 
+    covariate = "Race", 
+    min_n_each_arm = 5
+  ) +
+    plot_annotation(
+      title = 
+        .x |> str_replace("rBV_week_", "rBV by week ") |> 
+        str_replace("Lc_week_", "L. crispatus colonization at week ") 
+    )
+)
+
+
+```
+
+```{r}
+
+models_race <-
+  map(
+    outcomes,
+    ~ fit_outcome_prediction_models(
+      AYV, 
+      outcome = .x, covariate = "Race", use_IPW = TRUE, 
+      model = "glm", family = glm_family, test_deviance = test_deviance
+    )
+  ) 
+
+
+  models_race |> 
+  map(
+    ~ tibble(
+      outcome = .x$outcome,
+      `p-value` = .x$heterogeneity_test$Pr[2]
+      )
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    `BH adjusted p-value` = p.adjust(`p-value`, method = "BH") |> format.pval(digits = 2),
+    `p-value` = `p-value` |> format.pval(digits = 2)
+  ) |> gt(
+  caption = "Test for heterogeneity of treatment effects by participants' self-reported Race"
+) 
+
+```
+
+
+
+
+
+## Contraceptive choices
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+#| eval: false
+
+
+map(
+  outcomes,
+  ~ plot_risks(
+    AYV, 
+    outcome = .x, 
+    covariate = "Contraceptive", 
+    min_n_each_arm = 5
+  ) +
+    plot_annotation(
+      title = 
+        .x |> str_replace("rBV_week_", "rBV by week ") |> 
+        str_replace("Lc_week_", "L. crispatus colonization at week ") 
+    )
+)
+
+
+```
+
+```{r}
+
+models_contraception <-
+  map(
+    outcomes,
+    ~ fit_outcome_prediction_models(
+      AYV, 
+      outcome = .x, covariate = "Contraceptive", use_IPW = TRUE, 
+      model = "glm", family = glm_family, test_deviance = test_deviance
+    )
+  ) 
+
+
+models_contraception |> 
+  map(
+    ~ tibble(
+      outcome = .x$outcome,
+      `p-value` = .x$heterogeneity_test$Pr[2]
+    )
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    `BH adjusted p-value` = p.adjust(`p-value`, method = "BH") |> format.pval(digits = 2),
+    `p-value` = `p-value` |> format.pval(digits = 2)
+  ) |> gt(
+    caption = "Test for heterogeneity of treatment effects by participants' contraceptive"
+  ) 
+
+```
+
+
+
+## Study site
+
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+
+map(
+  outcomes,
+  ~ plot_risks(
+    AYV, 
+    outcome = .x, 
+    covariate = "Site", 
+    min_n_each_arm = 5
+  ) +
+    plot_annotation(
+      title = 
+        .x |> str_replace("rBV_week_", "rBV by week ") |> 
+        str_replace("Lc_week_", "L. crispatus colonization at week ") 
+    )
+)
+
+
+```
+
+```{r}
+
+models_sites <-
+  map(
+    outcomes,
+    ~ fit_outcome_prediction_models(
+      AYV, 
+      outcome = .x, covariate = "Site", use_IPW = TRUE, 
+      model = "glm", family = glm_family, test_deviance = test_deviance
+    )
+  ) 
+
+
+models_sites |> 
+  map(
+    ~ tibble(
+      outcome = .x$outcome,
+      `p-value` = .x$heterogeneity_test$Pr[2]
+    )
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    `BH adjusted p-value` = p.adjust(`p-value`, method = "BH") |> format.pval(digits = 2),
+    `p-value` = `p-value` |> format.pval(digits = 2)
+  ) |> gt(
+    caption = "Test for heterogeneity of treatment effects by participants' recruitment site"
+  ) 
+
+```
+
+There is no heterogeneity by study site, which is reassuring for the generalizability of the results.
+
+
+
+
+
+
+# Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>
+
+
+
+

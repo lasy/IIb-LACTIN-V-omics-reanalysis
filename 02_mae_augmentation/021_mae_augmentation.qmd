@@ -1,0 +1,1441 @@
+---
+title: "MAE augmentation"
+author: Laura Symul
+date: today
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    embed-resources: true
+execute:
+  cache: true
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+
+## Augmenting `colData(mae)` 
+
+For downstream analyses, it is convenient to add variables such as `has_V0`, `has_V1`, or `has_V0_and_V1`  to flag participants for which samples at Visit 0 (pre-MTZ) and/or Visit 1 (post-MTZ) are available.
+
+```{r}
+
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame()
+clin <-
+  clin |> 
+  group_by(USUBJID) |> 
+  mutate(
+    has_V0 = any(AVISITN == 0),
+    has_V1 = any(AVISITN == 1),
+    has_V0_and_V1 = has_V0 & has_V1
+  ) |> 
+  ungroup()
+
+MultiAssayExperiment::colData(mae)$has_V0 <- clin$has_V0
+MultiAssayExperiment::colData(mae)$has_V1 <- clin$has_V1
+MultiAssayExperiment::colData(mae)$has_V0_and_V1 <- clin$has_V0_and_V1
+
+```
+
+## 16S-derived assays
+
+### Filtering out low count ASVs
+
+```{r}
+
+filter_criteria <- 
+  list(min_tot_count = 50, n_samples = 2, min_counts_per_sample = 5)
+
+```
+
+Sometimes, it is convenient to work with a "lighter" ASV table. To create that
+lighter table, we keep ASVs that have at least `r filter_criteria$min_counts_per_sample` counts
+in at least `r filter_criteria$n_samples` samples and at least `r filter_criteria$min_tot_count` counts across all samples.
+
+
+
+```{r}
+
+non_zero_ASVs <- 
+  filter_out_low_count_ASVs(
+    mae, assay_name = 'ASV_16S', 
+    min_tot_count = filter_criteria$min_tot_count,
+    min_n_samples = filter_criteria$n_samples, 
+    min_counts_per_sample = filter_criteria$min_counts_per_sample
+    )
+
+non_zero_ASVs$plot
+
+mae <- c(mae, non_zero_ASVs$SE)
+
+```
+```{r}
+
+# statistics of what that does
+
+n_all_ASV <- 
+  MultiAssayExperiment::assay(mae,"ASV_16S") |> nrow()
+n_non_zero_ASVs <- 
+  SummarizedExperiment::assay(non_zero_ASVs$SE$ASV_16S_filtered) |> nrow()
+
+perc_removed <- (100 * (1 - n_non_zero_ASVs/n_all_ASV)) |>  round()
+
+counts_all_ASVs <- 
+  MultiAssayExperiment::assay(mae,"ASV_16S") |> sum()
+counts_non_zero_ASVs <- 
+  SummarizedExperiment::assay(non_zero_ASVs$SE$ASV_16S_filtered) |> sum()
+
+perc_counts_removed <- 
+  (100 * (1 - counts_non_zero_ASVs/counts_all_ASVs)) |> round(2)
+
+```
+
+
+
+That removes `r perc_removed`% of ASVs, but only `r perc_counts_removed`% of total counts.
+
+
+
+
+### Relative abundance assays
+
+We add three assays with relative abundances:
+
+- one with the relative abundance of ASVs
+
+- one with the relative abundances of taxa (ASV counts aggregated by taxonomic level)
+
+- one with the relative abundances of taxa and where we distinguish between CTV-05 and non-CTV-05 *Lactobacillus crispatus*
+
+```{r}
+
+rel_abundances_ASV <- 
+  get_relative_abundance_assay(mae, assay_name = "ASV_16S_filtered") 
+mae <- c(mae, rel_abundances_ASV)
+
+rel_abundances_tax <- get_relative_abundance_assay(mae, assay_name = "tax_16S") 
+mae <- c(mae, rel_abundances_tax)
+
+```
+
+
+```{r}
+
+ctv05_wide <- get_assay_wide_format(mae, "MG_CTV05")
+
+props_with_ctv05 <- 
+  ctv05_wide |> 
+  select(Barcode, assay) |> 
+  unnest(assay) |> 
+  select(-`Non L. crispatus`) |> 
+  dplyr::rename(
+    "CTV05" = `CTV-05`, 
+    "non-CTV05 Lactobacillus crispatus" = `non-CTV-05 L. crispatus`,
+    "undetermined Lactobacillus crispatus" = `Undetermined L. crispatus`
+    ) |> 
+  full_join(
+    get_assay_wide_format(mae, "tax_16S_p", add_colData = FALSE) |>
+      unnest(assay) |> 
+      select(-`Lactobacillus crispatus`),
+    by = join_by(Barcode)
+    ) |> 
+  as.data.frame() |> 
+  column_to_rownames("Barcode") |> 
+  as.matrix()
+
+props_with_ctv05 <- 
+  props_with_ctv05 / rowSums(props_with_ctv05)
+  
+```
+
+```{r}
+
+rowdata <- 
+  SummarizedExperiment::rowData(mae[["tax_16S"]]) |> 
+  as.data.frame() 
+
+j <- which(rownames(rowdata) == "Lactobacillus crispatus")
+new_rowdata <- 
+  bind_rows(
+    rowdata[rep(j, 3), ] |> 
+      mutate(
+        strain = c("CTV-05", "non-CTV-05", "undetermined"),
+        tax_label = str_c("Lactobacillus crispatus (", strain, ")"),
+        key = tax_label
+        ) |> 
+      set_rownames(
+        c(
+          "CTV05", 
+          "non-CTV05 Lactobacillus crispatus", 
+          "undetermined Lactobacillus crispatus")
+        ),
+    rowdata[-j,]
+  )
+
+```
+
+
+```{r}
+
+new_assay <-  list()
+new_assay[["tax_CTV05_p"]] <-
+  SummarizedExperiment::SummarizedExperiment(
+    assay = props_with_ctv05 |> t(),
+    rowData = new_rowdata
+  )
+new_assay
+
+mae <- c(mae, new_assay)
+
+```
+
+
+
+### Prop Lacto and Categories
+
+We create and add an assay that has the proportion of *Lactobacillus* in each
+sample
+
+```{r}
+
+props <- 
+  get_assay_long_format(mae, "tax_16S_p", add_colData = FALSE)
+prop_Lacto <- 
+  props |> 
+  mutate(
+    category  = 
+      case_when(
+        str_detect(feature, "crispatus") ~ "L_crisp",
+        str_detect(feature, "iners") ~ "L_iners",
+        str_detect(feature, "Lactobacillus") ~ "other_Lacto",
+        TRUE ~ "non_Lacto"
+      )
+  ) |> 
+  group_by(Barcode, category) |> 
+  summarize(prop = sum(value), .groups = "drop") |> 
+  pivot_wider(id_cols = Barcode, names_from = category, values_from = prop,
+              names_prefix = "prop_") |> 
+  mutate(
+    prop_Lacto = prop_other_Lacto + prop_L_crisp + prop_L_iners,
+    prop_non_iners_Lacto = prop_Lacto - prop_L_iners
+    ) |> 
+  select(Barcode, prop_L_crisp, prop_L_iners, prop_other_Lacto, prop_Lacto, prop_non_iners_Lacto, prop_non_Lacto) |> 
+  as.data.frame() 
+prop_Lacto <- prop_Lacto |> set_rownames(prop_Lacto$Barcode) |> select(-Barcode)
+
+prop_Lacto_assay <- list()
+prop_Lacto_assay[["prop_Lacto"]] <- 
+  SummarizedExperiment::SummarizedExperiment(
+    assay = prop_Lacto |> t()
+  )
+
+mae <- c(mae, prop_Lacto_assay)
+
+
+```
+
+The distribution of *Lactobacillus* is as follows:
+
+```{r}
+#| fig-height: 3
+prop_Lacto |> 
+  ggplot(aes(x = prop_Lacto)) +
+  geom_histogram(binwidth = 0.02) + 
+  scale_x_continuous("Proportion of Lactobacillus", breaks = seq(0, 1, 0.1))
+
+```
+The distribution of *Lactobacillus crispatus* is:
+
+```{r}
+#| fig-height: 3
+prop_Lacto |> 
+  ggplot(aes(x = prop_L_crisp)) +
+  geom_histogram(binwidth = 0.02) + 
+  scale_x_continuous("Proportion of L. crispatus", breaks = seq(0, 1, 0.1))
+
+```
+
+
+And we also add an assay that categorize each target visit sample according to the endpoint definition.
+
+
+```{r}
+
+categories_levels <- 
+  c(
+    "≥ 50% L. crispatus", 
+    "≥ 50% Lactobacillus, < 50% L. crispatus", 
+    "< 50% Lactobacillus" 
+  )
+
+categories <- 
+  get_assay_wide_format(mae, "prop_Lacto") |> 
+  mutate(
+    category = 
+      case_when(
+        (AVISITN >= 0) & (assay$prop_L_crisp >= 0.5) ~ categories_levels[1],
+        (AVISITN >= 0) & (assay$prop_Lacto >= 0.5) ~ categories_levels[2],
+        (AVISITN >= 0) ~ categories_levels[3],
+        TRUE ~ NA_character_
+      ) |> factor(levels = categories_levels)
+  ) |> 
+  select(Barcode, category) |> 
+  as.data.frame() |> 
+  column_to_rownames("Barcode")
+
+categories_assay <- list()
+categories_assay[["mb_categories"]] <- 
+  SummarizedExperiment::SummarizedExperiment(
+    assay = categories |> t()
+  )
+
+mae <- c(mae, categories_assay)
+
+```
+
+The distribution of the microbiota categories is as follow:
+
+```{r}
+#| fig-height: 3
+#| fig-width: 7
+ggplot(categories |> filter(!is.na(category)), aes(y = category)) + 
+  geom_bar() +
+  ylab("") + xlab("Number of samples")
+
+```
+
+
+
+
+```{r}
+
+categories_wide <-
+  categories |>
+  rownames_to_column() |>
+  mutate(tmp = (!is.na(category)) * 1) |>
+  pivot_wider(names_from = category, values_from = tmp, values_fill = 0) |> 
+  select(-any_of("NA")) |> 
+  mutate(across(all_of(categories_levels), .f = function(x){x; x[is.na(categories$category)] <- NA; x})) |> 
+  as.data.frame() |> 
+  column_to_rownames() |> 
+  select(all_of(categories_levels))
+
+
+categories_wide_assay <- list()
+categories_wide_assay[["mb_categories_wide"]] <- 
+  SummarizedExperiment::SummarizedExperiment(
+    assay = categories_wide |> t()
+  )
+
+mae <- c(mae, categories_wide_assay)
+
+```
+
+
+
+### CST and sub-CST assignments
+
+We add an assay with the CST and sub-CST assignments (VALENCIA) for each sample.
+
+```{r}
+
+counts <- MultiAssayExperiment::assay(mae, "tax_16S") |> t()
+
+library(ValenciaR) # devtools::install_github("lasy/ValenciaR")
+
+counts_Valencia <- 
+  ValenciaR::convert_to_Valencia_taxonomy(
+    input = counts, 
+    tax_table = SummarizedExperiment::rowData(mae[["tax_16S"]]) |> as.data.frame()
+  )
+
+assignments <- 
+  ValenciaR::assign_to_Valencia_clusters(
+    input = counts_Valencia$converted_input,
+    distance = "YC"
+  )
+
+CST_assay <- list()
+CST_assay[["CST"]] <- 
+  SummarizedExperiment::SummarizedExperiment(
+    assay = assignments$assignment |> t()
+  )
+
+mae <- c(mae, CST_assay)
+
+```
+The distribution of CST/sub-CSTs is as follow:
+
+```{r}
+#| fig-height: 3.8
+
+assignments$assignment |> 
+  ggplot(aes(y = subCST |> fct_rev())) +
+  geom_bar() +
+  facet_grid(CST ~ ., scales = "free", space = "free") +
+  ylab("CST/subCST") +
+  theme(strip.text.y = element_text(angle = 0))
+ 
+```
+
+And the distribution of dissimilarities between samples and assigned subCST centroids is as follow:
+
+```{r}
+
+assignments$assignment |> 
+  ggplot(aes(x = distance_to_subCST)) +
+  geom_histogram(binwidth = 0.02) +
+  facet_grid(subCST ~ ., scales = "free") +
+    stat_summary(
+    aes(x = 0.1, y = distance_to_subCST, xintercept = stat(y)), 
+    fun.y = median, geom = "vline", col = "red"
+    ) +
+  theme(strip.text.y = element_text(angle = 0)) +
+  xlab("Dissimilarity (Yue-Clayton) to subCST centroid")
+
+
+```
+
+
+```{r}
+
+most_prevalent_genus <- 
+  get_assay_long_format(mae, "tax_16S_p", add_colData = FALSE) |> 
+  left_join(
+    SummarizedExperiment::rowData(mae[["tax_16S_p"]]) |> 
+      as.data.frame() |>
+      rownames_to_column("feature") |> 
+      as_tibble(),
+    by = join_by(feature)
+  ) |> 
+  group_by(Barcode, Genus) |> 
+  summarize(rel_ab = sum(value), .groups = "drop") |> 
+  arrange(Barcode, -rel_ab) |> 
+  group_by(Barcode) |>
+  slice_head(n = 1) |> 
+  ungroup() |> 
+  dplyr::rename(most_prev_genus = Genus) |> 
+  arrange(-rel_ab) |>
+  mutate(most_prev_genus = most_prev_genus |> str_replace("Candidatus Lachnocurva", "Ca. Lachn. (BVAB1)") |> fct_inorder()) |> 
+  arrange(Barcode) |> 
+  select(-rel_ab)
+
+```
+
+
+
+```{r}
+
+assignments$assignment |> 
+  rownames_to_column("Barcode") |> 
+  left_join(
+    most_prevalent_genus, 
+    by = join_by(Barcode)
+  ) |>
+  ggplot(aes(x = distance_to_subCST)) +
+  geom_histogram(binwidth = 0.02) +
+    stat_summary(
+    aes(x = 0.1, y = distance_to_subCST, xintercept = stat(y)), 
+    fun.y = median, geom = "vline", col = "red"
+    ) +
+  facet_grid(most_prev_genus ~ ., scales = "free") +
+  theme(strip.text.y = element_text(angle = 0)) +
+  xlab("Dissimilarity (Yue-Clayton) to subCST centroid")
+
+```
+
+```{r}
+most_prevalent_genus |> 
+  dplyr::count(most_prev_genus) |> 
+  mutate(`%` = (100 * n/sum(n)) |> round()) |>
+  gt(caption = "Number and % of sample per most prevalent genus")
+```
+
+
+
+
+
+```{r}
+
+assignments_BC <- 
+  ValenciaR::assign_to_Valencia_clusters(
+    input = counts_Valencia$converted_input,
+    distance = "BC"
+  )
+
+```
+
+```{r}
+
+assignments_BC$assignment |> 
+  ggplot(aes(x = distance_to_subCST)) +
+  geom_histogram(binwidth = 0.02) +
+  facet_grid(subCST ~ ., scales = "free") +
+    stat_summary(
+    aes(x = 0.1, y = distance_to_subCST, xintercept = stat(y)), 
+    fun.y = median, geom = "vline", col = "red"
+    ) +
+  theme(strip.text.y = element_text(angle = 0)) +
+  xlab("Dissimilarity (Bray-Curtis) to subCST centroid")
+
+```
+
+```{r}
+
+assignments_BC$assignment  |> 
+  rownames_to_column("Barcode") |> 
+  left_join(
+    most_prevalent_genus, 
+    by = join_by(Barcode)
+  ) |>
+  ggplot() +
+  aes(x = distance_to_subCST) +
+  facet_grid(most_prev_genus ~ ., scales = "free") +
+  geom_histogram(aes(y = ..density..), binwidth = 0.02) +
+  stat_summary(
+    aes(x = 0.1, y = distance_to_subCST, xintercept = stat(y)), 
+    fun.y = median, geom = "vline", col = "red"
+    ) +
+  theme(strip.text.y = element_text(angle = 0)) +
+  xlab("Dissimilarity (Bray-Curtis) to subCST centroid")
+
+```
+
+
+We note that for many non-Lactobacillus-dominated subCSTs, the dissimilarity to the centroid is quite high, which suggests that these subCSTs are not well defined in this cohort.
+
+```{r}
+
+assignments_BC$assignment |> 
+  mutate(
+    `BC dissimilarity to centroid` = ifelse(distance_to_subCST > 0.5, "> 0.5", "≤ 0.5")
+  ) |> 
+  dplyr::count(`BC dissimilarity to centroid`) |> 
+  mutate(`%` = (100 * n/sum(n)) |> round()) |>
+  gt()
+
+```
+
+
+The median BC dissimilarity to centroids is `r assignments_BC$assignment$distance_to_subCST |> median() |> round(2)`.
+
+
+```{r}
+#| fig-height: 6
+#| fig-width: 10
+
+tmp <- 
+assignments$distances |> 
+  as.data.frame() |> 
+  rownames_to_column("Barcode") |>
+  pivot_longer(-Barcode, names_to = "subCST", values_to = "distance") |>
+  group_by(Barcode) |> 
+  arrange(Barcode, distance) |> 
+  slice_head(n = 2) |> 
+  summarize(
+    diff_dist = distance[2] - distance[1], 
+    distance_with_next_closest_subCST = distance[2],
+    .groups = "drop"
+    ) |> 
+  left_join(
+    assignments$assignment |> rownames_to_column("Barcode"), by = join_by(Barcode)
+  ) |> 
+  group_by(subCST) |>
+  mutate(goodness_of_assignment = (diff_dist - 2 * distance_to_subCST)/max(distance_to_subCST)) |> 
+  ungroup() 
+
+tmp |>
+  ggplot() +
+  aes(x = distance_to_subCST, y = distance_with_next_closest_subCST, col = goodness_of_assignment) +
+  facet_wrap(subCST ~ .) +
+  geom_abline(intercept = 0, slope = 1) +
+  geom_abline(intercept = 0.05, slope = 1.2, linetype = 3, col = "red", alpha = 0.5) +
+  geom_point(alpha = 0.5) +
+  scale_color_gradient("Goodness of\nsubCST assignment", low = "red", high = "steelblue1") +
+  xlab("YC dissimilarity to closest subCST") +
+  ylab("YC dissimilarity to next closest subCST") 
+  
+```
+
+```{r}
+#| fig-height: 6
+#| fig-width: 10
+
+tmp <- 
+assignments_BC$distances |> 
+  as.data.frame() |> 
+  rownames_to_column("Barcode") |>
+  pivot_longer(-Barcode, names_to = "subCST", values_to = "distance") |>
+  group_by(Barcode) |> 
+  arrange(Barcode, distance) |> 
+  slice_head(n = 2) |> 
+  summarize(
+    diff_dist = distance[2] - distance[1], 
+    distance_with_next_closest_subCST = distance[2],
+    .groups = "drop"
+    ) |> 
+  left_join(
+    assignments_BC$assignment |> rownames_to_column("Barcode"), by = join_by(Barcode)
+  ) |> 
+  group_by(subCST) |>
+  mutate(goodness_of_assignment = (diff_dist - 2 * distance_to_subCST)/max(distance_to_subCST)) |> 
+  ungroup() 
+
+tmp |>
+  ggplot() +
+  aes(x = distance_to_subCST, y = distance_with_next_closest_subCST, col = goodness_of_assignment) +
+  facet_wrap(subCST ~ .) +
+  geom_abline(intercept = 0, slope = 1) +
+  geom_abline(intercept = 0.05, slope = 1.2, linetype = 3, col = "red", alpha = 0.5) +
+  geom_point(alpha = 0.5) +
+  scale_color_gradient("Goodness of\nsubCST assignment", low = "red", high = "steelblue1") +
+  xlab("BC dissimilarity to closest subCST") +
+  ylab("BC dissimilarity to next closest subCST") 
+  
+```
+
+
+
+```{r}
+
+
+tmp <- 
+  tmp |> 
+  mutate(
+    `Distance to centroids` = 
+      ifelse(
+        distance_with_next_closest_subCST < (0.05 + 1.2 * distance_to_subCST), 
+        "Almost equidistant to two CTS/subCSTs",
+        "Closer to assigned CST/subCST"
+      )
+    
+  )
+
+tmp |> 
+  dplyr::count(`Distance to centroids`) |> 
+  mutate(`%` = (100 * n/sum(n)) |> round()) |> 
+  gt::gt()
+
+```
+
+
+
+We also note that, in addition to being very far from their respective subCST centroids, about 40% of samples are almost equally close to their assigned subCST than to the next closest subCST (below the dashed line). This proportion varies widely by CST/subCSTs:
+
+```{r}
+ 
+tmp |> 
+  group_by(subCST) |> 
+  dplyr::count(`Distance to centroids`) |> 
+  mutate(`%` = (100 * n/sum(n)) |> round()) |> 
+  gt::gt(row_group_as_column = TRUE)
+
+```
+
+
+For the non-*Lactobacillus* dominated samples (*i.e.*, samples in which the proportion of Lactobacillus is < 80%), that proportion is even higher.
+
+```{r}
+
+tmp |> 
+  left_join(
+    get_assay_long_format(mae, "prop_Lacto", add_colData = FALSE) |> 
+      filter(feature == "prop_Lacto") |> 
+      dplyr::rename(prop_Lacto = value) |> 
+      select(Barcode, prop_Lacto), 
+    by = join_by(Barcode)
+  ) |> 
+  mutate(
+    Lacto_group = ifelse(prop_Lacto >= 0.5, "≥ 50% Lactobacillus", "< 50% Lactobacillus")
+    ) |>
+  group_by(Lacto_group) |>
+  dplyr::count(`Distance to centroids`) |> 
+  mutate(`%` = (100 * n/sum(n)) |> round()) |> 
+  gt::gt(row_group_as_column = TRUE)
+
+
+
+```
+
+
+
+
+
+### Topic models of the taxa counts
+
+Analyses above show that many samples do not fit well into the CST/subCST framework. 
+
+An alternative to classifying samples so single CST/subCST is to use topic models, which are mixed membership models that allow each sample to be a mixture of subcommunities (a mixture of several topics) (see Sankaran and Holmes, 2019 and Symul et al., 2023).
+
+We fit the topics *de novo*, that is we do not use "reference" subcommunities, but rather identify these subcommunities from the data. 
+
+We do this using the `alto` package, which is a wrapper around the `lda` package, and which allows to examine how subcommunities relate to each other across models with different number of subcommunities.
+
+So, we first fit the topic models for different number of subcommunities (K), and then we label the sub-communities according to their taxonomic composition and such that their label match their most similar subCST.
+
+```{r}
+ 
+counts <- MultiAssayExperiment::assay(mae, "tax_16S") |> t()
+max_K <- 15
+
+```
+
+We fit the topic models for K in 1 to `r max_K`.
+
+```{r}
+#| warning: false
+
+
+library(alto) # devtools::install_github("lasy/alto")
+
+lda_models <- 
+  run_lda_models(
+    data = counts, 
+    lda_varying_params_lists = 
+      setNames(purrr::map(1:max_K, ~ list(k = .)), 1:max_K),
+    dir = str_c(data_dir(),"/03_augmented_mae/lda_models/"),
+    reset = FALSE, 
+    verbose = TRUE
+  )
+
+
+valencia_centroids_mat <- 
+  ValenciaR::get_Valencia_clusters()
+
+labelled_lda_models <- 
+  label_models_topics(
+    lda_models = lda_models,
+    tax_table = 
+      SummarizedExperiment::rowData(mae[["tax_16S"]]) |> as.data.frame(),
+    valencia_centroids_mat = valencia_centroids_mat,
+    distance = "YC"
+  )
+
+```
+
+The alignments of topics look like this:
+
+
+```{r}
+
+aligned_topics_transport <- 
+  align_topics(models = labelled_lda_models, method = "transport")
+
+plot(aligned_topics_transport) +
+  labs(title = '"Transport" alignment',
+       subtitle = "(= based on the similarities of sub-community compositions)",
+       xlab = "Number of sub-communities (topics)")
+
+aligned_topics_product <- 
+  align_topics(models = labelled_lda_models, method = "product")
+
+plot(aligned_topics_product) +
+  labs(title = '"Product" alignment',
+       subtitle = "(= based on the similarities of sample compositions)",
+       xlab = "Number of sub-communities (topics)")
+
+```
+
+One of the metrics used to identify an optimal number of topic is the number of path identified throughout K.
+
+```{r}
+
+topics <- 
+  bind_rows(
+    aligned_topics_transport@topics |> mutate(method = "transport"),
+    aligned_topics_product@topics |> mutate(method = "product")
+  )
+
+plot_number_of_paths(compute_number_of_paths(aligned_topics_transport)) +
+  ggtitle("Transport") +
+plot_number_of_paths(compute_number_of_paths(aligned_topics_product)) +
+  ggtitle("Product")
+
+```
+
+This suggests that there might be 7 or 9 true sub-communities.
+
+We can also examine the distribution of *coherence* and *refinement* scores:
+
+```{r}
+
+ggplot(topics, aes(x = m, y = coherence, fill = method, col = method)) +
+  geom_boxplot(alpha = 0.5) +
+ggplot(topics, aes(x = m, y = refinement, fill = method, col = method)) +
+  geom_abline(slope = 1, intercept = 0) +
+  geom_boxplot(alpha = 0.5) +
+  plot_layout(guides = "collect")
+
+```
+
+We see a first drop around K = 4-5, and a second drop at K = 8-9.
+
+We can check the sub-communities composition for a selection of Ks:
+
+```{r}
+#| fig-height: 8
+#| fig-width: 12
+
+plot_beta(aligned_topics_transport, models = c(5, 6, 7, 9)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+```
+
+From these plots, it looks like K = 7 might be a good compromise between dimension reduction, representation accuracy, and minimizing the number of spurious topics.
+
+
+We note that at none of these resolutions (K = 5, 6, 7, 9) do we find any topic similar to the subCSTs IV-C(0-4).
+
+#### Optimal topic model
+
+We store the sample topic-mixtures and the topic composition as a SE in the MAE
+
+
+```{r}
+
+optimal_K <- 7
+topic_SE <- 
+  make_topic_SE(
+    assay_name = str_c("topics_16S_", optimal_K), 
+    lda_model = labelled_lda_models[[optimal_K]]
+  )
+mae <- c(mae, topic_SE)
+
+```
+
+### "Constrained" Topic models of the taxa counts
+
+One of the problem with the topic models fitted above is that it may happen that
+non-Lacto species are mixed with Lacto species in the topic models. This may
+reflect actual biology, which would be interesting to study, but this may also
+simply correspond to a data-set specific "statistical optimum" that does not
+have a biological interpretation.
+
+The main "issue" is with the topic V dominated by *L. jensenii*:
+
+```{r}
+#| fig-height: 4
+#| warning: false
+
+beta_long <- get_beta_long(mae, assayname = "topics_16S_7")
+beta_long |> 
+  filter(topic_subcst_matching_label %in% c("I","III","V")) |> 
+  filter(prop > 1/500) |>
+  arrange(topic, -prop) |>
+  mutate(taxa = taxa |> factor(levels = unique(taxa))) |> 
+  ggplot() +
+  aes(y = taxa |> fct_rev(), x = prop, fill = topic) +
+  geom_col() +
+  facet_grid(. ~ topic_label) +
+  guides(fill = "none") +
+  ylab("") + xlab("proportion in topic") +
+  scale_fill_viridis(
+    discrete = TRUE, option = "A", direction = -1, end = 0.85, begin = 0.2
+    )
+
+```
+
+
+One potential simple solution is to constraint "*Lactobacillus* topics" to only
+contain *Lactobacillus* species and fit the topic model on the remaining
+non-*Lactobacillus* species.
+
+#### *Lactobacillus* topics
+
+```{r}
+
+counts <- MultiAssayExperiment::assay(mae, "tax_16S") |> t()
+props <- MultiAssayExperiment::assay(mae, "tax_16S_p") |> t()
+
+props_long <- 
+  get_assay_long_format(
+    mae, "tax_16S_p", add_colData = FALSE,
+    feature_name = "taxa", values_name = "prop")
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3
+
+
+props_long_lacto <- 
+  props_long |>  
+  filter(str_detect(taxa, "Lactobacillus")) |> 
+  group_by(taxa) |>
+  mutate(median_prop = median(prop)) |> 
+  ungroup() |> 
+  arrange(-median_prop) |>
+  mutate(
+    taxa = taxa |> str_replace("Lactobacillus", "L."),
+    taxa = taxa |> factor(levels = unique(taxa))
+    )
+
+# props_long_lacto |> 
+#   ggplot(aes(x = taxa, y = prop)) +
+#   geom_boxplot(outlier.alpha = 0.25, outlier.size = 0.5, fill = "antiquewhite3", col = "antiquewhite4") +
+#   xlab("Taxa") 
+
+g <- 
+props_long_lacto |> 
+  ggplot(aes(y = taxa |> fct_rev(), x = prop, col = taxa)) +
+  geom_jitter(width = 0, height = 0.15, size  = 0.5) +
+  xlab("Proportion in samples") + ylab("") +
+  scale_color_manual(values = get_topic_colors(c("III","I", "V", rep("VI", 7)))) +
+  guides(col = "none")
+
+g
+
+
+```
+
+
+```{r}
+
+ggsave(g, filename = str_c(fig_out_dir(), "S2C.pdf"), width = 10, height = 3, device = cairo_pdf)
+
+```
+
+
+Among all Lactobacillus species, there are only 3 making more than 50% of a
+sample in at least 10 samples: *Lactobacillus iners, crispatus*, and *jensenii.*
+
+So, we'll create 4 Lactobacillus topics:
+
+-   topic I : 100% *L. crispatus*
+
+-   topic II : 100% *L. iners*
+
+-   topic V: 100% *L. jensenii*
+
+-   topic VI: mix of the remaining *Lactobacillus* species
+
+```{r}
+
+Lacto_topics_beta <- 
+  matrix(0, nrow = ncol(counts), ncol = 4) |> 
+  set_colnames(c("I","III","V","VI")) |> 
+  set_rownames(colnames(counts))
+
+Lacto_topics_beta["Lactobacillus crispatus","I"] <- 1
+Lacto_topics_beta["Lactobacillus iners","III"] <- 1
+Lacto_topics_beta["Lactobacillus jensenii","V"] <- 1
+
+all_Lacto_species <- str_subset(colnames(props), "Lactobacillus")
+other_Lacto_species <- 
+setdiff(
+  all_Lacto_species, 
+  str_c("Lactobacillus ", c("crispatus","iners","jensenii"))
+  )
+
+Lacto_topics_beta[other_Lacto_species,"VI"] <- 
+  colSums(props[,other_Lacto_species])/sum(props[,other_Lacto_species])
+
+```
+
+
+```{r}
+#| fig-height: 4
+
+Lacto_topics_beta |> 
+  as.data.frame() |> 
+  rownames_to_column("Taxa") |>
+  pivot_longer(-Taxa, names_to = "topic", values_to = "prop") |>
+  filter(prop > 0) |>
+  arrange(topic, -prop) |>
+  mutate(Taxa = Taxa |> factor(levels = unique(Taxa))) |> 
+  ggplot(aes(y = Taxa |> fct_rev(), x = topic)) +
+  geom_tile(aes(alpha = prop), fill = "#F56172") +
+  geom_text(aes(label = round(prop,2)), size = 4) +
+  ylab("") + xlab("Topic") 
+
+```
+
+
+```{r}
+
+Lacto_topics_gamma <- 
+  cbind(
+    props[, str_c("Lactobacillus ", c("crispatus","iners","jensenii"))], 
+    rowSums(props[, other_Lacto_species])
+  ) |> 
+  set_colnames(c("I","III","V","VI"))
+
+```
+
+The distribution of these topics in samples is as follow:
+
+```{r}
+
+Lacto_topics_gamma |> 
+  as.data.frame() |> 
+  rownames_to_column("sample") |>
+  pivot_longer(-sample, names_to = "topic", values_to = "prop") |>
+  ggplot(aes(x = prop)) +
+  geom_histogram(bins = 50) +
+  facet_grid(topic ~ ., labeller = label_both) +
+  theme(strip.text.y = element_text(angle = 0))
+
+```
+
+#### Non-*Lactobacillus* topics
+
+We now fit the topic models for all non-*Lactobacillus* species. We do this by fitting topic models on the counts of non-*Lactobacillus* species for K = 1 to 15.
+
+```{r}
+#| warning: false
+
+# we remove the Lacto species
+non_Lacto_counts <- counts[, !(colnames(counts) %in% all_Lacto_species)]
+# we remove the samples that only have Lacto species
+non_Lacto_counts <- non_Lacto_counts[rowSums(non_Lacto_counts) != 0, ]
+
+max_K <- 15
+
+library(alto) # devtools::install_github("lasy/alto")
+
+lda_models <- 
+  run_lda_models(
+    data = non_Lacto_counts, 
+    lda_varying_params_lists = 
+      setNames(purrr::map(1:max_K, ~ list(k = .)), 1:max_K),
+    dir = str_c(data_dir(), "03_augmented_mae/lda_models_nonLacto/"),
+    reset = FALSE, 
+    verbose = TRUE
+  )
+
+tax_table <- 
+  SummarizedExperiment::rowData(mae[["tax_16S"]]) |> 
+  as.data.frame()
+tax_table <- tax_table[colnames(non_Lacto_counts), ]
+
+labelled_lda_models <- 
+  label_models_topics(
+    lda_models = lda_models,
+    tax_table = tax_table,
+    valencia_centroids_mat = ValenciaR::get_Valencia_clusters(),
+    distance = "YC"
+  )
+
+```
+
+Just as we did for the topic models above, we can compute the alignment of topics across K and plot the coherence and refinement scores of topics as a function of K.
+
+
+```{r}
+
+aligned_topics_transport <- 
+  align_topics(models = labelled_lda_models, method = "transport")
+
+plot(aligned_topics_transport) +
+  labs(title = '"Transport" alignment',
+       subtitle = "(= based on the similarities of sub-community compositions)",
+       xlab = "Number of sub-communities (topics)")
+
+aligned_topics_product <- 
+  align_topics(models = labelled_lda_models, method = "product")
+
+plot(aligned_topics_product) +
+  labs(title = '"Product" alignment',
+       subtitle = "(= based on the similarities of sample compositions)",
+       xlab = "Number of sub-communities (topics)")
+
+```
+To identify the optimal K, we display the diagnostics scores (number of path, refinement, coherence) across resolution.
+
+```{r}
+
+topics <- 
+  bind_rows(
+    aligned_topics_transport@topics |> mutate(method = "transport"),
+    aligned_topics_product@topics |> mutate(method = "product")
+  )
+
+plot_number_of_paths(compute_number_of_paths(aligned_topics_transport)) +
+  ggtitle("Transport") +
+plot_number_of_paths(compute_number_of_paths(aligned_topics_product)) +
+  ggtitle("Product")
+
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+g <- 
+plot(aligned_topics_transport) +
+  labs(
+    title = 'Topic alignment across K',
+    subtitle = '"Transport" alignment, based on topic similarities'
+  ) +
+  xlab("K: Number of topics") +
+  
+  plot_number_of_paths(compute_number_of_paths(aligned_topics_product)) +
+   labs(
+    title = 'Number of path across K',
+    subtitle = 'Alignment based on sample similarities'
+  )  +
+  xlab("K") +
+  theme_publication() +
+  plot_layout(widths = c(1.4, 1)) + 
+  plot_annotation(tag_levels = "A")
+
+g
+
+```
+
+```{r}
+
+ggsave(g, filename = str_c(fig_out_dir(), "S2AB.pdf"), width = 13, height = 6, device = cairo_pdf)
+
+```
+
+
+
+
+
+```{r}
+
+ggplot(topics, aes(x = m, y = coherence, fill = method, col = method)) +
+  geom_boxplot(alpha = 0.5) +
+ggplot(topics, aes(x = m, y = refinement, fill = method, col = method)) +
+  geom_abline(slope = 1, intercept = 0) +
+  geom_boxplot(alpha = 0.5) +
+  plot_layout(guides = "collect")
+
+```
+
+The composition of topics at various resolutions can be visualized as follows:
+
+
+```{r}
+#| fig-height: 8
+#| fig-width: 12
+
+plot_beta(aligned_topics_transport, models = c(4, 5, 6, 11)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+
+```
+
+
+#### Combining *Lactobacillus* and non-*Lactobacillus* topics
+
+
+From these visualizations, it looks like K = 4 or K = 5 would be good choices for the number of non-*Lactobacillus* topics.
+
+We will thus save two topic models: one with K = 4 and one with K = 5, which we both combine with the "*Lactobacillus* topics" defined above. We then store these two models as a SE in the MAE.
+
+**K = 4**
+
+K = 4 is a good choice because it is a stable number of path across many K when relying on the product alignment.
+
+```{r}
+
+combined_topics_K4 <- 
+  combine_topics(4, labelled_lda_models, Lacto_topics_gamma, Lacto_topics_beta)
+
+topic_SE <- 
+  make_topic_SE(
+    assay_name = str_c("c_topics_16S_", nrow(combined_topics_K4$beta)), 
+    lda_model = combined_topics_K4
+  )
+
+mae <- c(mae, topic_SE)
+
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+plot_topic_betas(mae, "c_topics_16S_8") +
+  xlab("topic number")
+
+```
+
+
+
+**K = 5**
+
+K = 5 might also a good choice because the transport alignment suggests that these 5 topics are quite well preserved at higher resolutions. It also highlights a little better the co-occurence of *Fannyhessea vaginae* (prev. *Atopobium vaginae*) and *G. swidsinskii/leopoldii* and/or *G. vaginalis* (but not with *G. piotii*), which has been observed in previous cohorts (see Symul et al, 2023).
+
+```{r}
+
+combined_topics_K5 <- 
+  combine_topics(5, labelled_lda_models, Lacto_topics_gamma, Lacto_topics_beta)
+
+topic_SE <- 
+  make_topic_SE(
+    assay_name = str_c("c_topics_16S_", nrow(combined_topics_K5$beta)), 
+    lda_model = combined_topics_K5
+  )
+
+mae <- c(mae, topic_SE)
+
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+plot_topic_betas(mae, "c_topics_16S_9")
+
+```
+
+
+```{r}
+
+taxa_props <- get_assay_wide_format(mae, "tax_16S_p")
+
+taxa_props |> 
+  select(Barcode, assay) |> 
+  unnest(cols = c(assay)) |> 
+  select(Barcode, contains("Gardnerella") | contains("Fannyhessea")) |> 
+  pivot_longer(cols = contains("Gardnerella"), 
+               names_to = "Gardnerella", values_to = "prop") |>
+  group_by(Gardnerella) |> 
+  mutate(cor = cor(prop, `Fannyhessea vaginae`)) |> 
+  ungroup() |> 
+  ggplot(aes(x = `Fannyhessea vaginae`, y = prop, col = Gardnerella)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  facet_grid(. ~ Gardnerella) +
+  guides(col = "none")
+
+```
+
+However, we note here that the proportions of *G. piotii* are very low in this cohort so we do not observe strong mutual exclusions with *Fannyhessea*.
+ 
+ 
+Since both models (K = 4 or K = 5) are saved, we can use either of them in downstream analyses. 
+
+
+#### Quality of the topic model
+
+```{r}
+
+estimated_sample_composition <- 
+  t(assay(mae[["c_topics_16S_8"]])) %*% mae[["c_topics_16S_8"]]@metadata$beta
+
+observed_sample_composition <- 
+  t(assay(mae[["tax_16S_p"]]))[rownames(estimated_sample_composition), colnames(estimated_sample_composition)] 
+
+class(observed_sample_composition) <- "matrix"
+
+est_vs_obs <- 
+  array(
+    c(estimated_sample_composition, observed_sample_composition),
+    dim = c()
+    )
+
+topic_tmp <- 
+  tibble(
+    Barcode = rownames(estimated_sample_composition),
+    BC = 1 - 2 * rowSums(pmin(estimated_sample_composition, observed_sample_composition)) / rowSums(estimated_sample_composition + observed_sample_composition)
+  ) |>
+  left_join(
+    assignments_BC$assignment |> 
+      rownames_to_column("Barcode"),
+    by = join_by(Barcode)
+  ) |> 
+  left_join(
+    most_prevalent_genus
+  ) 
+
+
+```
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+topic_tmp |> 
+  mutate(most_prev_genus = most_prev_genus |> fct_reorder(BC)) |> 
+  ggplot() +
+  aes(x = distance_to_subCST, y = BC, col = most_prev_genus) +
+  geom_abline(intercept = 0, slope = 1) +
+  geom_point(alpha = 0.5) +
+  xlab("Bray-Curtis dissimilarity to nearest CST/subCST") +
+  ylab("Bray-Curtis dissimilarity to estimated sample composition") +
+  coord_fixed() +
+  scale_color_viridis(
+    "Most\nprevalent\ngenus", discrete = TRUE, option = "H"
+  ) +
+
+
+topic_tmp |> 
+  ggplot() +
+  aes(x = distance_to_subCST, y = BC, col = subCST) +
+  geom_abline(intercept = 0, slope = 1) +
+  geom_point(alpha = 0.5) +
+  xlab("Bray-Curtis dissimilarity to nearest CST/subCST") +
+  ylab("Bray-Curtis dissimilarity to estimated sample composition") +
+  coord_fixed()
+
+```
+
+
+
+
+
+### "Constrained" topic models with CTV05
+
+We divide topic I defined above into two topics: one 100% composed of the CTV-05 strain and one 100% composed of the other *Lactobacillus crispatus* strains.
+
+* Topic I.a: CTV-05
+
+* Topic I.b: non-CTV-05 *Lactobacillus crispatus*
+
+* Topic I.c: undetermined *Lactobacillus crispatus*
+
+
+
+```{r}
+
+Lacto_topics_beta <- 
+  matrix(0, nrow = ncol(counts) - 1, ncol = 6) |> 
+  set_rownames(colnames(counts) |> str_subset("crispatus", negate = TRUE))
+
+Lacto_topics_beta <- 
+  matrix(0, nrow = 3, ncol = 6) |> 
+  set_rownames(str_c("Lactobacillus crispatus (", c("CTV05", "non-CTV05", "?"), ")")) |> 
+  rbind(Lacto_topics_beta) |> 
+  set_colnames(c("I.a", "I.b", "I.c","III","V","VI")) 
+
+Lacto_topics_beta["Lactobacillus crispatus (CTV05)","I.a"] <- 1
+Lacto_topics_beta["Lactobacillus crispatus (non-CTV05)","I.b"] <- 1
+Lacto_topics_beta["Lactobacillus crispatus (?)","I.c"] <- 1
+Lacto_topics_beta["Lactobacillus iners","III"] <- 1
+Lacto_topics_beta["Lactobacillus jensenii","V"] <- 1
+
+all_Lacto_species <- str_subset(colnames(props), "Lactobacillus")
+other_Lacto_species <- 
+setdiff(
+  all_Lacto_species, 
+  str_c("Lactobacillus ", c("crispatus","iners","jensenii"))
+  )
+
+Lacto_topics_beta[other_Lacto_species,"VI"] <- 
+  colSums(props[,other_Lacto_species])/sum(props[,other_Lacto_species])
+
+```
+
+
+```{r}
+#| fig-height: 4
+
+Lacto_topics_beta |> 
+  as.data.frame() |> 
+  rownames_to_column("Taxa") |>
+  pivot_longer(-Taxa, names_to = "topic", values_to = "prop") |>
+  filter(prop > 0) |>
+  arrange(topic, -prop) |>
+  mutate(Taxa = Taxa |> factor(levels = unique(Taxa))) |> 
+  ggplot(aes(y = Taxa |> fct_rev(), x = topic)) +
+  geom_tile(aes(alpha = prop), fill = "#F56172") +
+  geom_text(aes(label = round(prop,2)), size = 4) +
+  ylab("") + xlab("Topic") 
+
+```
+```{r}
+
+ctv05_wide <- get_assay_wide_format(mae, "MG_CTV05")
+
+j <- which(colnames(props) == "Lactobacillus crispatus")
+props_with_ctv05 <- 
+  ctv05_wide |> 
+  select(Barcode, assay) |> 
+  unnest(assay) |> 
+  select(-`Non L. crispatus`) |> 
+  dplyr::rename(
+    "Lactobacillus crispatus (CTV05)" = `CTV-05`, 
+    "Lactobacillus crispatus (non-CTV05)" = `non-CTV-05 L. crispatus`,
+    "Lactobacillus crispatus (?)" = `Undetermined L. crispatus`
+    ) |> 
+  inner_join(
+    props[, -j] |> as.data.frame() |> rownames_to_column("Barcode"),
+    by = join_by(Barcode)
+    ) |> 
+  as.data.frame() |> 
+  column_to_rownames("Barcode") |> 
+  as.matrix()
+
+props_with_ctv05 <- 
+  props_with_ctv05 / rowSums(props_with_ctv05)
+  
+```
+
+
+```{r}
+
+pure_lacto_topics <- 
+  c(
+    "Lactobacillus crispatus (CTV05)",
+    "Lactobacillus crispatus (non-CTV05)",
+    "Lactobacillus crispatus (?)",
+    "Lactobacillus iners",
+    "Lactobacillus jensenii"
+  )
+
+Lacto_topics_gamma <- 
+  cbind(
+    props_with_ctv05[, pure_lacto_topics], 
+    rowSums(props_with_ctv05[, other_Lacto_species])
+  ) |> 
+  set_colnames(c("I.a", "I.b", "I.c","III","V","VI"))
+
+```
+
+The distribution of these topics in samples is as follow:
+
+```{r}
+
+Lacto_topics_gamma |> 
+  as.data.frame() |> 
+  rownames_to_column("sample") |>
+  pivot_longer(-sample, names_to = "topic", values_to = "prop") |>
+  ggplot(aes(x = prop)) +
+  geom_histogram(bins = 50) +
+  facet_grid(topic ~ ., labeller = label_both) +
+  theme(strip.text.y = element_text(angle = 0))
+
+```
+
+
+
+#### Combining *Lactobacillus* and non-*Lactobacillus* topics
+
+
+```{r}
+
+combined_topics_K4 <- 
+  combine_topics(4, labelled_lda_models, Lacto_topics_gamma, Lacto_topics_beta)
+
+topic_SE <- 
+  make_topic_SE(
+    assay_name = str_c("c_topics_16S_", nrow(combined_topics_K4$beta), "_ctv05"), 
+    lda_model = combined_topics_K4
+  )
+
+mae <- c(mae, topic_SE)
+
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+plot_topic_betas(mae, "c_topics_16S_10_ctv05")
+
+```
+
+
+
+
+
+

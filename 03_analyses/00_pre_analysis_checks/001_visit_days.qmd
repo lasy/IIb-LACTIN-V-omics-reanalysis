@@ -1,0 +1,188 @@
+---
+title: "Timing of visits" 
+author: Laura Symul
+format: 
+   html:
+     page-layout: full
+     code-fold: true
+     toc: true
+     toc-location: left
+     toc-depth: 5
+     embed-resources: true
+execute:
+  cache: true
+knitr:
+  opts_chunk:
+    out.width: "100%"
+editor: source
+---
+
+# Timing of visits
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(gt)
+library(ggrepel)
+
+
+```
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+# tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+theme_set(theme_publication())
+
+```
+
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(dir = str_c(data_dir(), "03_augmented_mae/")) 
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame() |> as_tibble()
+
+```
+
+
+
+
+```{r}
+
+
+tmp <- 
+  clin |> 
+  filter(!is.na(DAY)) |> 
+  left_join(get_assay_wide_format(mae, "tax_16S_p", add_colData = FALSE) |> mutate(has_16S = TRUE), by = join_by(Barcode)) |> 
+  filter(has_16S) |> 
+  select(USUBJID, ARM, AVISITN, PIPV) 
+
+bind_rows(
+  tmp |> 
+    select(USUBJID, ARM) |> 
+    distinct() |> 
+    dplyr::count(ARM) |> 
+    mutate(Visit = "At least one visit"),
+  tmp |> 
+    filter(PIPV) |> 
+    mutate(Visit = get_visit_labels(AVISITN)) |> 
+    dplyr::count(ARM, Visit),
+  tmp |> 
+    filter(PIPV) |> 
+    group_by(USUBJID) |> mutate(n = n()) |> ungroup() |> filter(n == max(n)) |> 
+    select(USUBJID, ARM) |> 
+    distinct() |> 
+    dplyr::count(ARM) |> 
+    mutate(Visit = "All planned in-person visits")
+) |> 
+  mutate(
+    Visit = 
+      Visit |> 
+      factor(
+        levels = 
+          c(
+            "At least one visit", 
+            get_visit_labels(c(0:4, 7)) |> levels(), 
+            "All planned in-person visits"
+            )
+        )
+    ) |> 
+  dplyr::rename(Arm = ARM) |> 
+  pivot_wider(id_cols = Arm, names_from = Visit, values_from = n) |> 
+  as.data.frame() |> column_to_rownames("Arm") |> 
+  gt(
+    rownames_to_stub = TRUE,
+    caption = "Number of participants in each study arm (rows) with an available 16S rRNA sequencing data at any, each, or all planned in-person visits."
+  ) |> 
+  grand_summary_rows(
+    fns =  list(label = "Total", id = "totals", fn = "sum"),
+    fmt = ~ fmt_integer(.),
+    side = "top"
+  ) 
+
+```
+
+
+```{r}
+#| fig-height: 8
+#| fig-width: 6
+
+g <- 
+clin |> 
+  filter(!is.na(DAY)) |> 
+  left_join(get_assay_wide_format(mae, "tax_16S_p", add_colData = FALSE) |> mutate(has_16S = TRUE), by = join_by(Barcode)) |> 
+  filter(has_16S) |> 
+  ggplot() +
+  aes(x = DAY, y = USUBJID, col = AVISITN |> floor() |> get_visit_labels(), shape = VISIT_TYPE) +
+  geom_point() +
+  facet_grid(ARM ~ ., scales = "free_y", space = "free_y") +
+  scale_color_brewer("Visit", type = "qual", palette = 3, guide = guide_legend(direction = "vertical")) +
+  scale_shape_manual("Visit type", values = c(16, 3), guide = guide_legend(direction = "vertical")) +
+  theme(axis.text.y = element_blank(), legend.position = "right") +
+  labs(
+    x = "Study day",
+    y = "Participants",
+    subtitle = "Visits with 16S rRNA sequencing data"
+  )
+g 
+
+
+```
+```{r}
+
+ggsave(g, filename = str_c(fig_out_dir(), "S1A.pdf"), width = 6, height = 8, device = cairo_pdf)
+
+```
+
+
+
+
+```{r}
+#| fig-height: 3
+
+clin |> 
+  filter(AVISITN == 0, !is.na(DAY)) |> 
+  ggplot(aes(x = DAY + 5)) + geom_histogram(binwidth = 1) +
+  labs(
+    title = "Screening visits timing distribution",
+    x = "Day relative to first MTZ dose",
+    y = "Number of participants"
+  )
+
+
+
+
+```
+
+
+
+```{r}
+
+# j <- which(mae$ARM == "Placebo")
+# mae_Placebo <- mae[,j,]
+# mae_Placebo <- mae_Placebo[,,c(3,9)]
+# save(mae_Placebo, file = "mae_Placebo.RData")
+
+
+```
+

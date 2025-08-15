@@ -1,0 +1,1662 @@
+---
+title: "Cytokine trajectories"
+author: Laura Symul
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    number-sections: true
+execute:
+  cache: true
+  warning: false
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(ggrepel)
+library(ggcorrplot)
+library(MBViz) # devtools::install_github("lasy/MBViz")
+library(ggtext)
+library(factoextra)
+library(ade4)
+library(gt)
+
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+theme_set(theme_publication())
+```
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(dir = str_c(data_dir(), "03_augmented_mae"))  
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame()
+
+```
+
+```{r}
+cytokines_wide <- get_assay_wide_format(mae, "cytokine_transformed")
+cytokine_names <- cytokines_wide$assay |> colnames()
+```
+
+We have reliable measurements for `r cytokine_names |> length()` cytokines: `r str_c(cytokine_names, collapse = ", ")`.
+
+
+## Descriptive analysis (PCA) 
+
+As noted in the pre-processing, cytokine concentrations were highly correlated. We suspected that the observed size-effect could have both technical or biological origins. For example, uncontrolled total amount of material collected on swab could explain technical differences in cytokine concentrations, while biological differences could be explained by an overall increase or decrease in inflammation.
+
+Therefore, we proposed several transformation of the cytokine concentration:
+
+- a simple log-transformation to stabilize the variance
+
+- the same transformation followed by a subtraction of the 1st principal component that captures the observed size-effect.
+
+Before investigating the effects of MTZ and Lactin-V on inflammatory profiles in the next section, we perform a principal component analysis (PCA) on these two transformed cytokine abundances to describe the relationships between cytokines and the overall variation in cytokine concentrations.
+
+### PCA on the log10 concentrations
+
+```{r}
+cytokines_wide <- get_assay_wide_format(mae, "cytokine_log10_incl_cytokine")
+```
+
+
+```{r}
+
+cytokines_pca <- 
+  dudi.pca(cytokines_wide$assay, scannf = FALSE, nf = 4, center = TRUE, scale = TRUE)
+
+```
+
+```{r}
+#| fig-height: 3
+
+fviz_eig(cytokines_pca)
+
+```
+
+
+
+The first three components explain `r (100*sum(cytokines_pca$eig[1:3])/sum(cytokines_pca$eig)) %>% round()`% of the total variance.
+
+The correlation circles below shows how each cytokine correlates with the first three components.
+
+```{r}
+#| label: cytokine-info
+
+cytokine_angle <- 
+  atan2(
+    cytokines_pca$c1[,2], cytokines_pca$c1[,3]
+    ) %% (2*pi)
+
+cytokine_info <- 
+  tibble(
+    cytokine = cytokines_wide$assay %>% colnames(),
+    angle = cytokine_angle
+  )  |> 
+  mutate(
+    cytokine = cytokine |> factor(levels = cytokine),
+    ITAC_angle = angle[cytokine == "ITAC"],
+    adjusted_angle = (2*pi + angle - ITAC_angle)%%(2*pi),
+    color_index = ceiling(adjusted_angle/2/pi*100),
+    color = 
+      colorRampPalette(
+        get_cytokine_angle_colors()
+        )(101)[color_index + 1]
+    )
+
+
+```
+
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4
+
+
+fviz_pca_var(
+  cytokines_pca, 
+  repel = TRUE, 
+  habillage = cytokine_info$cytokine, 
+  palette = cytokine_info$color,
+  title = "Cytokines - PCA of log10 concentrations\n(correlation circle)"
+) +
+  guides(col = "none") +
+
+
+fviz_pca_var(
+  cytokines_pca, axes = 2:3,
+  repel = TRUE, 
+  habillage = cytokine_info$cytokine, 
+  palette = cytokine_info$color,
+  title = "PC2-3"
+) +
+  guides(col = "none")
+
+
+```
+Cytokines are colored by their angle in the PC2-PC3 correlation circle.
+
+
+### PCA on the PC1-subtracted log10 concentrations
+
+Unsurprisingly, the PCA on the PC1-subtracted log10 concentrations is very similar to the results obtained on PC2+ of the PCA on the log10 concentrations.
+
+```{r}
+cytokines_wide <- get_assay_wide_format(mae, "cytokine_transformed")
+```
+
+
+```{r}
+
+cytokines_pca <- 
+  dudi.pca(cytokines_wide$assay, scannf = FALSE, nf = 4, center = TRUE, scale = TRUE)
+
+```
+
+```{r}
+#| fig-height: 3
+
+fviz_eig(cytokines_pca)
+
+```
+
+
+
+The first two components explain `r (100*sum(cytokines_pca$eig[1:2])/sum(cytokines_pca$eig)) %>% round()`% of the total variance.
+
+```{r}
+#| label: cytokine-info-transformed
+
+cytokine_angle <- 
+  atan2(
+    cytokines_pca$c1[,2], cytokines_pca$c1[,1]
+    ) %% (2*pi)
+
+cytokine_info <- 
+  tibble(
+    cytokine = cytokines_wide$assay %>% colnames(),
+    angle = cytokine_angle
+  )  |> 
+  mutate(
+    cytokine = cytokine |> factor(levels = cytokine),
+    ITAC_angle = angle[cytokine == "ITAC"],
+    adjusted_angle = (2*pi + angle - ITAC_angle)%%(2*pi),
+    color_index = ceiling(adjusted_angle/2/pi*100),
+    color = 
+      colorRampPalette(
+        get_cytokine_angle_colors()
+        )(101)[color_index + 1]
+    )
+
+
+```
+
+
+```{r}
+#| fig-width: 5
+#| fig-height: 4
+
+
+fviz_pca_var(
+  cytokines_pca, 
+  repel = TRUE, 
+ habillage = cytokine_info$cytokine, 
+  palette = cytokine_info$color,
+  title = "Cytokines - PCA of transformed abundances\n(correlation circle)"
+  ) +
+  guides(col = "none")
+
+
+```
+Cytokines are colored by their angle in the correlation circle.
+
+From these results, we expect that when examining the effects of MTZ and Lactin-V on cytokine concentrations, cytokines that are close to each other in the correlation circle will show similar profiles.
+
+
+```{r}
+cytokine_groups <- 
+  list(
+    cytokine_names[1:5],
+    cytokine_names[c(6:7, 12:13)],
+    cytokine_names[8:11]
+  )
+```
+
+
+## Univariate analysis of cytokines/chemokines: effects of treatment and intervention
+
+[sensitivity analyses] Below, we perform the analyses on the log10 concentration, as well as on the PC1-subtracted data.
+
+
+### Log10 concentrations
+
+```{r}
+assay_name <- "cytokine_log10_incl_cytokine"
+value_label <- "log10(conc.)"
+selected_cytokines <- c("IL-1b", "IP-10", "IL-6")
+```
+
+
+```{r}
+
+cytokines_long <- 
+  get_assay_long_format(
+    mae, assay_name, 
+    feature_name = "cytokine", values_name = "value"
+  ) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) 
+
+```
+
+
+```{r}
+
+cat("N cytokines: ", length(unique(cytokines_long$cytokine)), "\n")
+cat("N samples: ", length(unique(cytokines_long$Barcode)), "\n")
+
+```
+
+
+
+```{r}
+#| fig-height: 5
+#| fig-width: 10
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(PIPV, cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 10
+
+cytokines_long |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = Visit, y = value, fill = ARM)) +
+  geom_boxplot(outlier.shape = NA) + 
+  # geom_jitter(height = 0, width = 0.1, size = 0.5) +
+  facet_wrap(cytokine ~ ., scales = "free_y", nrow = 3) +
+  scale_fill_manual(values = get_arm_colors()) +
+  ylab(value_label) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+```{r}
+
+categories_levels <- 
+  c("≥ 50% L. crispatus", "≥ 50% Lactobacillus, < 50% L. crispatus", "< 50% Lactobacillus")
+microbiota_categories <- 
+  get_assay_long_format(
+    mae, "mb_categories", add_colData = FALSE, values_name = "microbiota"
+  ) |> 
+  select(-feature) |> 
+  mutate(microbiota = microbiota |> factor(levels = categories_levels))
+
+cytokines_long <- 
+  cytokines_long |> 
+  select(-any_of(c("microbiota"))) |> 
+  left_join(microbiota_categories, by = join_by(Barcode))
+
+```
+
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_arm_and_category(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+```{r}
+#| fig-height: 6
+#| fig-width: 8
+
+cytokines_long |> 
+  filter(cytokine %in% selected_cytokines) |>
+  plot_longitudinal_cytokines_by_arm_and_category(value_label = value_label)
+
+```
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_category(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+##### Differentiating CTV-05 from other *L. crispatus*.
+
+
+```{r}
+
+ctv05_cat_levels <- c("≥ 50% CTV-05", categories_levels, "Undetermined")
+
+microbiota_categories <- 
+  microbiota_categories |> 
+  left_join(
+    get_assay_long_format(
+      mae, "MG_CTV05", add_colData = FALSE, values_name = "prop"
+      ) |> filter(feature == "CTV-05"),
+    by = join_by(Barcode)
+  ) |> 
+  select(-feature) |> 
+  mutate(
+    microbiota_ctv05 = 
+      case_when(
+        prop >= 0.5 ~ "≥ 50% CTV-05",
+        is.na(microbiota) ~ "Undetermined",
+        TRUE ~ microbiota |> as.character()
+      ) |> 
+      factor(levels = ctv05_cat_levels)
+  )  
+
+cytokines_long <- 
+  cytokines_long |> 
+  select(-any_of("microbiota_ctv05")) |> 
+  left_join(
+    microbiota_categories |> select(Barcode, microbiota_ctv05), 
+    by = join_by(Barcode)
+    ) |> 
+  mutate(
+    microbiota_ctv05 = 
+      microbiota_ctv05 |> 
+      replace_na(factor("Undetermined", levels = ctv05_cat_levels))
+  )
+
+```
+
+
+With samples from both arms.
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+With samples from the Lactin-V arm only
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(ARM == "LACTIN-V", cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+
+```{r}
+#| fig-height: 5
+#| fig-width: 10
+
+cytokines_long |> 
+  filter(cytokine %in% "IP-10", microbiota_ctv05 != "Undetermined")  |> 
+  plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label) 
+
+```
+
+
+
+
+
+```{r}
+# checking for differences between CTV05 and "native" L. crispatus in both arms
+
+tmp <- 
+  cytokines_long |> 
+  filter(cytokine %in% "IP-10", PIPV) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+ 
+mmod <- lme4::lmer(value ~ microbiota_ctv05 + (1|USUBJID), data = tmp) 
+mmod |> summary() 
+car::Anova(mmod, type = "III")
+
+tmp <- 
+  cytokines_long |> 
+  filter(cytokine %in% "IP-10", AVISITN == 4) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+  
+lm(value ~ microbiota_ctv05, data = tmp) |>
+  summary()
+  
+```
+
+
+
+```{r}
+# checking for differences between CTV05 and "native" L. crispatus in the Lactin-V arm only
+
+
+tmp <- 
+  cytokines_long |> 
+  filter(ARM == "LACTIN-V", cytokine %in% "IP-10", PIPV) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+ 
+mmod <- lme4::lmer(value ~ microbiota_ctv05 + (1|USUBJID), data = tmp) 
+mmod |> summary() 
+car::Anova(mmod, type = "III")
+
+tmp <- 
+  cytokines_long |> 
+  filter(ARM == "LACTIN-V", cytokine %in% "IP-10", AVISITN == 4) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+  
+lm(value ~ microbiota_ctv05, data = tmp) |>
+  summary()
+  
+```
+
+
+#### Difference to pre-MTZ transformed concentrations
+
+```{r}
+
+preMTZ_cytokines <- 
+  cytokines_long |>
+  dplyr::filter(AVISITN == 0) |>
+  select(USUBJID, cytokine, value) |> 
+  dplyr::rename(pre_MTZ_value = value)
+
+cytokines_to_preMTZ <- 
+  cytokines_long |> 
+  filter(PIPV, AVISITN != 0) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) |>
+  select(Barcode, USUBJID, Visit, ARM, cytokine, value, microbiota) |> 
+  left_join(preMTZ_cytokines, by = join_by(USUBJID, cytokine)) |> 
+  filter(!is.na(pre_MTZ_value)) |> 
+  mutate(diff = value - pre_MTZ_value)
+
+```
+
+```{r}
+#| fig-height: 10
+#| fig-width: 8
+
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_to_preMTZ){
+    cytokines_to_preMTZ |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_cytokine_to_preMTZ(value_label = value_label)
+  },
+  cytokines_to_preMTZ = cytokines_to_preMTZ
+)
+
+```
+
+```{r}
+#| fig-height: 6
+
+g_selection <- 
+  cytokines_to_preMTZ |> 
+  filter(cytokine %in% selected_cytokines) |> 
+  mutate(cytokine = cytokine |> factor(levels = selected_cytokines)) |> 
+  plot_cytokine_to_preMTZ(value_label = value_label) 
+
+g_selection
+
+```
+
+```{r}
+#| fig-height: 6
+#| fig-width: 5
+
+g_selection <- 
+  cytokines_to_preMTZ |> 
+  filter(cytokine %in% selected_cytokines) |> 
+  filter(!(Visit %in% c("Week 4", "Week 8"))) |> 
+  mutate(cytokine = cytokine |> factor(levels = selected_cytokines)) |> 
+  plot_cytokine_to_preMTZ(value_label = value_label) 
+
+g_selection
+
+```
+
+
+```{r}
+
+save(g_selection, file = str_c(data_dir(), "05_figures_tables/fig_3a.Rdata"))
+
+```
+
+#### Effects of intervention at week 24
+
+```{r}
+
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention,
+    cytokines_long = cytokines_long
+  ) |> 
+  bind_rows()
+
+```
+
+```{r}
+
+res |> select(cytokine, ends_with("pval")) |> distinct() |> 
+  gt(caption = "Model validity tests from DHARMa simulations") |> 
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  ) 
+
+```
+
+Caution! Model assumptions are not met for most cytokines (likely because of the LLOQ and ULOQ imputed values). 
+
+We try again using ranks instead of the original values.
+
+```{r}
+
+set.seed(1) # rank uses random numbers to break ties
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention,
+    cytokines_long = cytokines_long,
+    use_ranks = TRUE
+  ) |> 
+  bind_rows()
+
+```
+
+```{r}
+
+res |> select(cytokine, ends_with("pval")) |> distinct() |> 
+  gt(caption = "Model validity tests from DHARMa simulations") |> 
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  ) 
+
+```
+Not much better...
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+res |> filter(visit %in% c("Week 12", "Week 24")) |> 
+  ggplot() +
+  aes(x = visit, y = estimate) +
+  facet_grid(. ~ cytokine) +
+  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
+  geom_point(size = 2) +
+  xlab("Visit") +
+  ylab("Estimated difference in percentile,\nadjusted for random participants effects\nand associated 95% CI.") +
+  labs(caption = "Linear mixed model fitted on ranks.") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  )
+
+```
+Non-parametric test instead.
+
+```{r}
+
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention_wilcox,
+    cytokines_to_preMTZ = cytokines_to_preMTZ
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    adj_p_value = p.adjust(p_value, method = "BH")
+  )
+
+```
+
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+res |> 
+  ggplot() +
+  aes(x = cytokine, y = estimate) +
+  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
+  geom_point(size = 2) +
+  xlab("") +
+  ylab("Estimated difference in location (Lactin-V - Placebo)\nand associated 95% CI.") +
+  labs(caption = "Wilcoxon signed rank test on the difference between log10(conc.) at baseline (pre-MTZ) and Week 24 visit") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+
+```{r}
+
+res |> 
+  select(-p_value) |> 
+  gt(caption = "Wilcoxon signed rank sum test on the difference between log10(conc.) at baseline (pre-MTZ) and Week 24 visit") |> 
+  fmt_number(
+    columns = -c("W"),
+    decimals = 3
+  ) 
+  
+
+```
+
+
+
+### Transformed concentrations
+
+```{r}
+assay_name <- "cytokine_log10_SE_corrected_incl_cytokine"
+value_label <- "PC1-subtracted z-log10(conc.)"
+```
+
+
+```{r}
+
+cytokines_long <- 
+  get_assay_long_format(
+    mae, assay_name, 
+    feature_name = "cytokine", values_name = "value"
+  ) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) 
+
+```
+
+
+
+```{r}
+
+cat("N cytokines: ", length(unique(cytokines_long$cytokine)), "\n")
+cat("N samples: ", length(unique(cytokines_long$Barcode)), "\n")
+
+```
+
+```{r}
+#| fig-height: 5
+#| fig-width: 10
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(PIPV, cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 10
+
+cytokines_long |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = Visit, y = value, fill = ARM)) +
+  geom_boxplot(outlier.shape = NA) + 
+  # geom_jitter(height = 0, width = 0.1, size = 0.5) +
+  facet_wrap(cytokine ~ ., scales = "free_y", nrow = 3) +
+  scale_fill_manual(values = get_arm_colors()) +
+  ylab(value_label) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+```{r}
+
+categories_levels <- 
+  c("≥ 50% L. crispatus", "≥ 50% Lactobacillus, < 50% L. crispatus", "< 50% Lactobacillus")
+microbiota_categories <- 
+  get_assay_long_format(
+    mae, "mb_categories", add_colData = FALSE, values_name = "microbiota"
+  ) |> 
+  select(-feature) |> 
+  mutate(microbiota = microbiota |> factor(levels = categories_levels))
+
+cytokines_long <- 
+  cytokines_long |> 
+  select(-any_of(c("microbiota"))) |> 
+  left_join(microbiota_categories, by = join_by(Barcode))
+
+```
+
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_arm_and_category(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+```{r}
+#| fig-height: 6
+#| fig-width: 6
+
+cytokines_long |> 
+  filter(cytokine %in% selected_cytokines) |>
+  plot_longitudinal_cytokines_by_arm_and_category(value_label = value_label)
+
+```
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_category(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+##### Differentiating CTV-05 from other *L. crispatus*.
+
+
+```{r}
+
+ctv05_cat_levels <- 
+  c("≥ 50% CTV-05", categories_levels, "Undetermined")
+microbiota_categories <- 
+  microbiota_categories |> 
+  left_join(
+    get_assay_long_format(
+      mae, "MG_CTV05", add_colData = FALSE, values_name = "prop"
+      ) |> filter(feature == "CTV-05"),
+    by = join_by(Barcode)
+  ) |> 
+  select(-feature) |> 
+  mutate(
+    microbiota_ctv05 = 
+      case_when(
+        prop >= 0.5 ~ "≥ 50% CTV-05",
+        is.na(microbiota) ~ "Undetermined",
+        TRUE ~ microbiota |> as.character()
+      ) |> 
+      factor(levels = ctv05_cat_levels)
+  )  
+
+cytokines_long <- 
+  cytokines_long |> 
+  select(-any_of("microbiota_ctv05")) |> 
+  left_join(
+    microbiota_categories |> select(Barcode, microbiota_ctv05), 
+    by = join_by(Barcode)
+    ) |> 
+  mutate(
+    microbiota_ctv05 = 
+      microbiota_ctv05 |> 
+      replace_na(factor("Undetermined", levels = ctv05_cat_levels))
+  )
+
+```
+
+
+With samples from both arms.
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+With samples from the Lactin-V arm only
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(ARM == "LACTIN-V", cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+
+```{r}
+#| fig-height: 5
+#| fig-width: 10
+#| cache: false
+
+g <- 
+cytokines_long |> 
+  filter(cytokine %in% "IP-10", microbiota_ctv05 != "Undetermined")  |> 
+  arrange(microbiota_ctv05) |> 
+  mutate(
+    microbiota_ctv05 = 
+      microbiota_ctv05 |> 
+      str_replace("Lactobacillus, < 50% L. crispatus", "Lacto., < 50% L. c.") |> 
+      fct_inorder()
+  ) |> 
+  plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label) 
+
+g
+
+```
+
+
+
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S4D.pdf"), width = 10, height = 4, device = cairo_pdf)
+
+```
+
+
+
+```{r}
+# checking for differences between CTV05 and "native" L. crispatus in both arms
+
+tmp <- 
+  cytokines_long |> 
+  filter(cytokine %in% "IP-10", PIPV) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+ 
+mmod <- lme4::lmer(value ~ microbiota_ctv05 + (1|USUBJID), data = tmp) 
+mmod |> summary() 
+car::Anova(mmod, type = "III")
+
+tmp <- 
+  cytokines_long |> 
+  filter(cytokine %in% "IP-10", AVISITN == 4) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+  
+lm(value ~ microbiota_ctv05, data = tmp) |>
+  summary()
+  
+```
+
+
+
+```{r}
+# checking for differences between CTV05 and "native" L. crispatus in the Lactin-V arm only
+
+
+tmp <- 
+  cytokines_long |> 
+  filter(ARM == "LACTIN-V", cytokine %in% "IP-10", PIPV) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+ 
+mmod <- lme4::lmer(value ~ microbiota_ctv05 + (1|USUBJID), data = tmp) 
+mmod |> summary() 
+car::Anova(mmod, type = "III")
+
+tmp <- 
+  cytokines_long |> 
+  filter(ARM == "LACTIN-V", cytokine %in% "IP-10", AVISITN == 4) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+  
+lm(value ~ microbiota_ctv05, data = tmp) |>
+  summary()
+  
+```
+
+
+#### Difference to pre-MTZ transformed concentrations
+
+```{r}
+
+preMTZ_cytokines <- 
+  cytokines_long |>
+  dplyr::filter(AVISITN == 0) |>
+  select(USUBJID, cytokine, value) |> 
+  dplyr::rename(pre_MTZ_value = value)
+
+cytokines_to_preMTZ <- 
+  cytokines_long |> 
+  filter(PIPV, AVISITN != 0) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) |>
+  select(Barcode, USUBJID, Visit, ARM, cytokine, value, microbiota) |> 
+  left_join(preMTZ_cytokines, by = join_by(USUBJID, cytokine)) |> 
+  filter(!is.na(pre_MTZ_value)) |> 
+  mutate(diff = value - pre_MTZ_value)
+
+```
+
+```{r}
+#| fig-height: 10
+#| fig-width: 8
+
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_to_preMTZ){
+    cytokines_to_preMTZ |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_cytokine_to_preMTZ(value_label = value_label)
+  },
+  cytokines_to_preMTZ = cytokines_to_preMTZ
+)
+
+```
+
+```{r}
+#| fig-height: 6
+
+g_selection <- 
+  cytokines_to_preMTZ |> 
+  filter(cytokine %in% selected_cytokines) |> 
+  mutate(cytokine = cytokine |> factor(levels = selected_cytokines)) |> 
+  plot_cytokine_to_preMTZ(value_label = value_label) 
+
+g_selection
+
+```
+
+```{r}
+#| fig-height: 6
+#| fig-width: 5
+
+g_selection <- 
+  cytokines_to_preMTZ |> 
+  filter(cytokine %in% selected_cytokines) |> 
+  filter(!(Visit %in% c("Week 4", "Week 8"))) |> 
+  mutate(cytokine = cytokine |> factor(levels = selected_cytokines)) |> 
+  plot_cytokine_to_preMTZ(value_label = value_label) 
+
+g_selection
+
+```
+
+
+```{r}
+
+save(g_selection, file = str_c(data_dir(), "05_figures_tables/fig_3a_PC1_subtracted_all.Rdata"))
+
+```
+
+
+#### Effects of intervention at week 24
+
+```{r}
+
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention,
+    cytokines_long = cytokines_long
+  ) |> 
+  bind_rows()
+
+```
+
+```{r}
+
+res |> select(cytokine, ends_with("pval")) |> distinct() |> 
+  gt(caption = "Model validity tests from DHARMa simulations") |> 
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  ) 
+
+```
+
+Caution! Model assumptions are not met for most cytokines (likely because of the LLOQ and ULOQ imputed values). 
+
+We try again using ranks instead of the original values.
+
+```{r}
+
+set.seed(1) # rank uses random numbers to break ties
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention,
+    cytokines_long = cytokines_long,
+    use_ranks = TRUE
+  ) |> 
+  bind_rows()
+
+```
+
+```{r}
+
+res |> select(cytokine, ends_with("pval")) |> distinct() |> 
+  gt(caption = "Model validity tests from DHARMa simulations") |> 
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  ) 
+
+```
+Not much better...
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+res |> filter(visit %in% c("Week 12", "Week 24")) |> 
+  ggplot() +
+  aes(x = visit, y = estimate) +
+  facet_grid(. ~ cytokine) +
+  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
+  geom_point(size = 2) +
+  xlab("Visit") +
+  ylab("Estimated difference in percentile,\nadjusted for random participants effects\nand associated 95% CI.") +
+  labs(caption = "Linear mixed model fitted on ranks.") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  )
+
+```
+Non-parametric test instead.
+
+```{r}
+
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention_wilcox,
+    cytokines_to_preMTZ = cytokines_to_preMTZ
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    adj_p_value = p.adjust(p_value, method = "BH")
+  )
+
+```
+
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+res |> 
+  ggplot() +
+  aes(x = cytokine, y = estimate) +
+  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
+  geom_point(size = 2) +
+  xlab("") +
+  ylab("Estimated difference in location (Lactin-V - Placebo)\nand associated 95% CI.") +
+  labs(caption = "Wilcoxon signed rank test on the difference between PC1-subtracted z-log10(conc.) at baseline (pre-MTZ) and Week 24 visit") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+```{r}
+
+res |> 
+  select(-p_value) |> 
+  gt(caption = "Wilcoxon signed rank test on the difference between PC1-subtracted z-log10(conc.) at baseline (pre-MTZ) and Week 24 visit") |> 
+  fmt_number(
+    columns = -c("W"),
+    decimals = 3
+  )
+
+```
+
+
+
+### Transformed concentrations (excluding samples with many OOR features)
+
+```{r}
+assay_name <- "cytokine_transformed"
+value_label <- "PC1-subtracted z-log10(conc.)"
+```
+
+
+```{r}
+
+cytokines_long <- 
+  get_assay_long_format(
+    mae, assay_name, 
+    feature_name = "cytokine", values_name = "value"
+  ) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) 
+
+```
+
+
+
+```{r}
+
+cat("N cytokines: ", length(unique(cytokines_long$cytokine)), "\n")
+cat("N samples: ", length(unique(cytokines_long$Barcode)), "\n")
+
+```
+
+```{r}
+#| fig-height: 5
+#| fig-width: 10
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(PIPV, cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 10
+
+cytokines_long |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = Visit, y = value, fill = ARM)) +
+  geom_boxplot(outlier.shape = NA) + 
+  # geom_jitter(height = 0, width = 0.1, size = 0.5) +
+  facet_wrap(cytokine ~ ., scales = "free_y", nrow = 3) +
+  scale_fill_manual(values = get_arm_colors()) +
+  ylab(value_label) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+```{r}
+
+categories_levels <- 
+  c("≥ 50% L. crispatus", "≥ 50% Lactobacillus, < 50% L. crispatus", "< 50% Lactobacillus")
+microbiota_categories <- 
+  get_assay_long_format(
+    mae, "mb_categories", add_colData = FALSE, values_name = "microbiota"
+  ) |> 
+  select(-feature) |> 
+  mutate(microbiota = microbiota |> factor(levels = categories_levels))
+
+cytokines_long <- 
+  cytokines_long |> 
+  select(-any_of(c("microbiota"))) |> 
+  left_join(microbiota_categories, by = join_by(Barcode))
+
+```
+
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_arm_and_category(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+```{r}
+#| fig-height: 6
+#| fig-width: 6
+
+cytokines_long |> 
+  filter(cytokine %in% selected_cytokines) |>
+  plot_longitudinal_cytokines_by_arm_and_category(value_label = value_label)
+
+```
+
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_category(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+##### Differentiating CTV-05 from other *L. crispatus*.
+
+
+```{r}
+
+ctv05_cat_levels <- 
+  c("≥ 50% CTV-05", categories_levels, "Undetermined")
+microbiota_categories <- 
+  microbiota_categories |> 
+  left_join(
+    get_assay_long_format(
+      mae, "MG_CTV05", add_colData = FALSE, values_name = "prop"
+      ) |> filter(feature == "CTV-05"),
+    by = join_by(Barcode)
+  ) |> 
+  select(-feature) |> 
+  mutate(
+    microbiota_ctv05 = 
+      case_when(
+        prop >= 0.5 ~ "≥ 50% CTV-05",
+        is.na(microbiota) ~ "Undetermined",
+        TRUE ~ microbiota |> as.character()
+      ) |> 
+      factor(levels = ctv05_cat_levels)
+  )  
+
+cytokines_long <- 
+  cytokines_long |> 
+  select(-any_of("microbiota_ctv05")) |> 
+  left_join(
+    microbiota_categories |> select(Barcode, microbiota_ctv05), 
+    by = join_by(Barcode)
+    ) |> 
+  mutate(
+    microbiota_ctv05 = 
+      microbiota_ctv05 |> 
+      replace_na(factor("Undetermined", levels = ctv05_cat_levels))
+  )
+
+```
+
+
+With samples from both arms.
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+With samples from the Lactin-V arm only
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_long){
+    cytokines_long |> 
+      filter(ARM == "LACTIN-V", cytokine %in% cytokines) |> 
+      plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label)
+  },
+  cytokines_long = cytokines_long
+)
+
+```
+
+
+
+```{r}
+#| fig-height: 5
+#| fig-width: 10
+
+cytokines_long |> 
+  filter(cytokine %in% "IP-10")  |> 
+  plot_longitudinal_cytokines_by_ctv05_cat(value_label = value_label) 
+
+```
+
+
+
+
+
+```{r}
+# checking for differences between CTV05 and "native" L. crispatus in both arms
+
+tmp <- 
+  cytokines_long |> 
+  filter(cytokine %in% "IP-10", PIPV) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+ 
+mmod <- lme4::lmer(value ~ microbiota_ctv05 + (1|USUBJID), data = tmp) 
+mmod |> summary() 
+car::Anova(mmod, type = "III")
+
+tmp <- 
+  cytokines_long |> 
+  filter(cytokine %in% "IP-10", AVISITN == 4) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+  
+lm(value ~ microbiota_ctv05, data = tmp) |>
+  summary()
+  
+```
+
+
+
+```{r}
+# checking for differences between CTV05 and "native" L. crispatus in the Lactin-V arm only
+
+
+tmp <- 
+  cytokines_long |> 
+  filter(ARM == "LACTIN-V", cytokine %in% "IP-10", PIPV) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+ 
+mmod <- lme4::lmer(value ~ microbiota_ctv05 + (1|USUBJID), data = tmp) 
+mmod |> summary() 
+car::Anova(mmod, type = "III")
+
+tmp <- 
+  cytokines_long |> 
+  filter(ARM == "LACTIN-V", cytokine %in% "IP-10", AVISITN == 4) |>
+  filter(microbiota_ctv05 %in% c("≥ 50% CTV-05", "≥ 50% L. crispatus"))
+  
+lm(value ~ microbiota_ctv05, data = tmp) |>
+  summary()
+  
+```
+
+
+#### Difference to pre-MTZ transformed concentrations
+
+```{r}
+
+preMTZ_cytokines <- 
+  cytokines_long |>
+  dplyr::filter(AVISITN == 0) |>
+  select(USUBJID, cytokine, value) |> 
+  dplyr::rename(pre_MTZ_value = value)
+
+cytokines_to_preMTZ <- 
+  cytokines_long |> 
+  filter(PIPV, AVISITN != 0) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) |>
+  select(Barcode, USUBJID, Visit, ARM, cytokine, value, microbiota) |> 
+  left_join(preMTZ_cytokines, by = join_by(USUBJID, cytokine)) |> 
+  filter(!is.na(pre_MTZ_value)) |> 
+  mutate(diff = value - pre_MTZ_value)
+
+```
+
+```{r}
+#| fig-height: 10
+#| fig-width: 8
+
+
+map(
+  cytokine_groups,
+  function(cytokines, cytokines_to_preMTZ){
+    cytokines_to_preMTZ |> 
+      filter(cytokine %in% cytokines) |> 
+      plot_cytokine_to_preMTZ(value_label = value_label)
+  },
+  cytokines_to_preMTZ = cytokines_to_preMTZ
+)
+
+```
+
+```{r}
+#| fig-height: 6
+
+g_selection <- 
+  cytokines_to_preMTZ |> 
+  filter(cytokine %in% selected_cytokines) |> 
+  mutate(cytokine = cytokine |> factor(levels = selected_cytokines)) |> 
+  plot_cytokine_to_preMTZ(value_label = value_label) 
+
+g_selection
+
+```
+
+
+
+```{r}
+
+save(g_selection, file = str_c(data_dir(), "05_figures_tables/fig_3a_PC1_subtracted.Rdata"))
+
+```
+
+
+#### Effects of intervention at week 24
+
+```{r}
+
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention,
+    cytokines_long = cytokines_long
+  ) |> 
+  bind_rows()
+
+```
+
+```{r}
+
+res |> select(cytokine, ends_with("pval")) |> distinct() |> 
+  gt(caption = "Model validity tests from DHARMa simulations") |> 
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  ) 
+
+```
+
+Caution! Model assumptions are not met for most cytokines (likely because of the LLOQ and ULOQ imputed values). 
+
+We try again using ranks instead of the original values.
+
+```{r}
+
+set.seed(1) # rank uses random numbers to break ties
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention,
+    cytokines_long = cytokines_long,
+    use_ranks = TRUE
+  ) |> 
+  bind_rows()
+
+```
+
+```{r}
+
+res |> select(cytokine, ends_with("pval")) |> distinct() |> 
+  gt(caption = "Model validity tests from DHARMa simulations") |> 
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  ) 
+
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+res |> filter(visit %in% c("Week 12", "Week 24")) |> 
+  ggplot() +
+  aes(x = visit, y = estimate) +
+  facet_grid(. ~ cytokine) +
+  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
+  geom_point(size = 2) +
+  xlab("Visit") +
+  ylab("Estimated difference in percentile,\nadjusted for random participants effects\nand associated 95% CI.") +
+  labs(caption = "Linear mixed model fitted on ranks.") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  )
+
+```
+Non-parametric test instead.
+
+```{r}
+
+res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention_wilcox,
+    cytokines_to_preMTZ = cytokines_to_preMTZ
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    adj_p_value = p.adjust(p_value, method = "BH")
+  )
+
+```
+
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+res |> 
+  ggplot() +
+  aes(x = cytokine, y = estimate) +
+  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
+  geom_point(size = 2) +
+  xlab("") +
+  ylab("Estimated difference in location (Lactin-V - Placebo)\nand associated 95% CI.") +
+  labs(caption = "Wilcoxon signed rank test on the difference between PC1-subtracted z-log10(conc.) at baseline (pre-MTZ) and Week 24 visit (Excluding samples with less than 5 within-range cytokines)") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+```{r}
+res |> 
+  select(-p_value) |> 
+  gt(caption = "Wilcoxon signed rank test on the difference between PC1-subtracted z-log10(conc.) at baseline (pre-MTZ) and Week 24 visit (Excluding samples with less than 5 within-range cytokines)") |> 
+  fmt_number(
+    columns = -c("W"),
+    decimals = 3
+  )
+
+```
+

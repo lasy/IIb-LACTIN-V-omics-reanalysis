@@ -1,0 +1,108 @@
+---
+title: "MAE Augmentation and assay transformation"
+author: Laura Symul
+date: today
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    embed-resources: true
+execute:
+  cache: true # true | refresh
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+
+
+```{r}
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(viridis)
+library(gt)
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../R", source)
+
+theme_set(theme_publication())
+
+```
+
+
+```{bash}
+#| eval: false
+mkdir -p lactinv_dropbox
+rclone mount lactinv-dropbox:"/Gates LACTIN-V/" "lactinv_dropbox/"
+```
+
+
+```{r}
+#| cache: false
+
+mae <- load_latest_mae(dir = str_c(data_dir(), "02_mae/"))
+raw_mae <- mae
+
+```
+
+In this document, we augment the `MAE` (MultiAssay Experiment) object with additional assays derived from the raw data. 
+
+
+```{r child = '021_mae_augmentation.Qmd'}
+```
+
+
+```{r child = '022_assay_transformations.Qmd'}
+```
+
+
+
+## Saving augmented `mae`
+
+We can now save this augmented `mae` object. 
+
+```{r}
+#| cache: false
+
+output_dir <- str_c(data_dir(), "03_augmented_mae/")
+
+save_mae(mae, output_dir)
+
+# If dropbox mounting was done manually, remember to unmount it.
+
+```
+
+As a reminder, the "raw" `mae` object had the following assays:
+
+```{r}
+raw_mae
+```
+
+Now, the `mae` object has these assays + additional ones:
+
+```{r}
+mae
+```
+
+
+
+
+## Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>
+
+

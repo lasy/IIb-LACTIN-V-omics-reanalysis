@@ -1,0 +1,68 @@
+
+```{r}
+library(SummarizedExperiment)
+library(MultiAssayExperiment)
+library(phyloseq)
+library(vegan)
+library(tidyverse)
+library(tidymodels)
+library(widyr)
+library(ggforce)
+library(ggbeeswarm)
+library(cowplot)
+library(ggpubr)
+library(corrplot)
+library(tidyjson)
+theme_set(theme_cowplot())
+```
+
+We first mount the `Gates LACTIN-V` dropbox folder locally:
+
+```{bash eval=FALSE}
+mkdir -p lactinv_dropbox
+rclone mount lactinv-dropbox:"/Gates LACTIN-V/" "lactinv_dropbox/"
+```
+
+```{r}
+mae <- readRDS("../lactinv_exploration_20230215/mae.RDS")
+
+
+long_df <- longFormat(mae) %>% as_tibble()
+
+sample_metadata <- colData(mae) %>%
+    as_tibble() %>%
+    rownames_to_column("primary")
+
+taxa_rel <- long_df %>%
+    filter(assay == "tax_16S") %>%
+    select(sample = primary, taxon = rowname, count = value) %>%
+    mutate(count = as.numeric(count)) %>%
+    group_by(sample) %>%
+    mutate(rel = count / sum(count)) %>%
+    ungroup()
+
+lactobacillus_samples <- taxa_rel %>%
+    filter(taxon == "Lactobacillus crispatus", rel > 0.05)
+
+read_tsv("/n/scratch3/users/j/je112/breseq_temp_output_202305033/output/output.vcf",
+    skip = 9
+) %>%
+    filter(`#CHROM` == "cluster_001_consensus_polypolish") %>%
+    separate(INFO, into = c("allele_freq", "allele_depth", "total_depth"), sep = ";") %>%
+    mutate_at(vars(allele_freq, allele_depth, total_depth), ~ str_split(., "=", simplify = TRUE)[, 2] %>% as.numeric()) %>%
+    ggplot(aes(x = allele_freq)) +
+    geom_histogram(binwidth = 0.05, center = 0.025)
+
+read_json("/n/scratch3/users/j/je112/breseq_temp_output_202305033/output/summary.json") %>%
+    spread_all() %>%
+    select(
+        total_reads = `reads.total_reads`,
+        total_bases = `reads.total_bases`,
+        reads_mapped = `references.reference.cluster_001_consensus_polypolish.num_reads_mapped_to_reference`,
+        bases_mapped = `references.reference.cluster_001_consensus_polypolish.num_bases_mapped_to_reference`,
+        coverage = `references.reference.cluster_001_consensus_polypolish.coverage_average`,
+        coverage_dispersion = `references.reference.cluster_001_consensus_polypolish.coverage_dispersion`
+    ) %>%
+    as_tibble()
+```
+

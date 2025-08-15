@@ -1,0 +1,1412 @@
+---
+title: "Microbiota Trajectories throughout the Trial"
+author: Laura Symul
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    number-sections: true
+execute:
+  cache: true
+  warning: false
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(ggrepel)
+library(ggcorrplot)
+library(MBViz) # devtools::install_github("lasy/MBViz")
+library(ggtext)
+library(factoextra)
+library(ade4)
+library(gt)
+
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+theme_set(theme_publication())
+```
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(dir = str_c(data_dir(), "03_augmented_mae"))  
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame()
+
+```
+
+
+
+## Microbiota composition (16S topics) trajectories 
+
+To describe the participants' microbiota composition trajectories, we use the sub-communities mixed-membership. Specifically, we show the topic (sub-community) proportions instead of the proportion of each species at each visit.
+
+```{r}
+
+topics_long <- 
+  get_assay_long_format(mae, "c_topics_16S_8", feature_name = "topic", values_name = "prop")
+
+asv_long <- 
+  get_assay_long_format(mae, "tax_16S_p", feature_name = "taxa", values_name = "prop")
+
+
+```
+
+### Example
+
+For example, for a random participant, @fig-MicrobiotaTaxaTrajEx shows the microbiota trajectory in terms of taxa proportions, while @fig-MicrobiotaTopicTrajEx shows the same trajectory in terms of topic (sub-community) proportions
+
+```{r}
+
+set.seed(123)
+random_participant <- sample(clin$USUBJID %>% unique(), 1)
+
+asv_df <- 
+  asv_long %>% 
+  filter(USUBJID == random_participant) %>% 
+  mutate(feature = taxa)
+
+```
+
+```{r}
+#| label: fig-MicrobiotaTaxaTrajEx
+#| fig-cap: "Example of microbiota composition trajectory in terms of taxa proportions (y-axis)"
+#| fig-height: 5
+
+plot_participants_trajectory(asv_df)
+
+```
+
+
+```{r}
+
+topic_df <- 
+  topics_long %>% 
+  filter(USUBJID == random_participant) %>% 
+  mutate(feature = topic)
+
+```
+
+
+```{r}
+#| label: fig-MicrobiotaTopicTrajEx
+#| fig-height: 4.5
+#| fig-cap: "Example of microbiota composition trajectory in terms of topic proportions (y-axis)"
+
+plot_participants_trajectory(topic_df, feature_name = "Sub-community")
+
+```
+
+As a reminder, the topic composition is as shown in @fig-topicComp.
+
+```{r}
+#| label: fig-topicComp
+#| fig-cap: "Composition of each topic (x-axis, colors) in terms of taxa (y-axis). The size of the dot indicate the proportion of a taxa in a topic. Proportions sum to 1 for each topic (vertically)."
+
+plot_topic_betas(mae, "c_topics_16S_8")
+
+```
+
+
+```{r}
+#| eval: false
+
+g_subcommunities <- 
+  plot_topic_betas(mae, "c_topics_16S_8") +
+  xlab("Sub-communities") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+g_subcommunities_caption <- 
+  str_c(
+    'Proportion (size of dots) of Taxa (y-axis) in each sub-communities (x-axis) identified in the samples of the study participants (all ',ncol(mae[["c_topics_16S_8"]]),' samples with 16S rRNA sequencing data were included for the identification of these sub-communities). Sub-communities were identified in two ways depending on taxonomic assignment of ASVs. Non-*Lactobacillus* sub-communities were identified using a latent Dirichlet allocation (LDA) model (Blei, et al. 2003), also known as “Bayesian topic models”. This model finds bacterial sub-communities (*i.e.*, consortia of bacteria that are co-occurring or that may be functionally equivalent) and provides the proportion of each taxon in each of these sub-communities. I also allows to express sample composition in terms of mixture of sub-communities and provide the proportion of each sub-community in each sample. In addition to the 4 non-*Lactobacillus* sub-communities identified by the model, we defined 4 *Lactobacillus*-dominated sub-communities: sub-community I is fully composed of *L. crispatus*, III of *L. iners*, V of *L. jensenii*, and VI is a mixture of other *Lactobacillus* species. The non-*Lactobacillus* sub-communities have been labelled such that their name match that of the most similar sub-CST. When they did not match any sub-CST, their label started with IV-O (for "other"). Proportions sum to one for each sub-community (vertically in this plot).'
+  )
+
+ggsave(
+  g_subcommunities, 
+  filename = str_c(data_dir(), "/05_figures_tables/topics_beta.pdf"),
+  dpi = 300, height = 8, width = 7, unit = "cm", scale = 2
+) 
+
+
+write_file(
+  g_subcommunities_caption, 
+  file = str_c(data_dir(), "05_figures_tables/topics_beta_caption.txt") 
+)
+
+
+```
+
+
+
+
+Back to the trajectory example: instead of encoding the sub-community proportions with the height of bars, we can use transparency (the topic proportion is encoded with the transparency of the color) as in @fig-trajExTransparency
+
+```{r}
+#| label: fig-trajExTransparency
+#| fig-cap: "Microbiota composition trajectory in terms of sub-community (topic) composition. The proportion of each topic (y-axis, colors) at each time-point (x-axis) is indicated by the transparency of the rectangle."
+#| fig-height: 4
+
+ggplot(topic_df, aes(x = AVISITN %>% get_visit_labels(), y = topic %>% fct_rev(), alpha = prop, fill = topic)) +
+  geom_tile() + 
+  scale_alpha(range = c(0, 1)) +
+  scale_fill_manual("", values = get_topic_colors(topic_df$topic %>% unique() %>% sort())) +
+  xlab("Visit") + ylab("")
+
+```
+
+This visualization allows a more compact view of the trajectories as we can collapse it to a single line as in @fig-traj-example-single-line.
+
+```{r}
+#| label: fig-traj-example-single-line
+#| fig-cap: "Same as in the previous figure, but the topics are collapsed into a single line (y-axis) so transparent colors add up (are mixed)."
+#| fig-height: 1
+
+ggplot(topic_df, aes(x = AVISITN %>% get_visit_labels(), y = USUBJID, alpha = prop, fill = topic)) +
+  geom_tile() + 
+  scale_alpha(range = c(0, 1)) +
+  scale_fill_manual("", values = get_topic_colors(topic_df$topic %>% unique() %>% sort())) +
+  xlab("Visit") + ylab("") +
+  guides(fill = "none", alpha = "none")
+
+```
+
+This compact representation allows to plot the trajectories of several participants at once.
+
+### Trajectories (clustering)
+
+To visualize trajectories of participants and group them by similarity, we use hierarchical clustering on these trajectories.
+
+We filter for participants with samples for at least 4/6 visits.
+
+
+```{r}
+
+topics_all <- get_assay_wide_format(mae, "c_topics_16S_8")
+topics_long_all <- get_assay_long_format(mae, "c_topics_16S_8", 
+                                         feature_name = "topic", values_name = "prop")
+
+participants_with_most_visits <- 
+  topics_all %>% 
+  filter(AVISITN %in% c(0:4, 7)) %>% 
+  group_by(USUBJID) %>% 
+  summarize(n_unique_visits = length(unique(AVISITN))) %>% 
+  filter(n_unique_visits >= 4)
+
+topics <- 
+  topics_all %>% 
+  filter(USUBJID %in% participants_with_most_visits$USUBJID, AVISITN %in% c(0:4, 7))
+
+topics_long <- 
+  topics_long_all %>% 
+  filter(USUBJID %in% participants_with_most_visits$USUBJID, AVISITN %in% c(0:4, 7))
+
+```
+
+We compute the distances between the participant trajectories. We use the Bray-Curtis dissimilarity.
+
+```{r}
+
+topics_wide <- 
+  topics |> 
+  select(USUBJID, ARM, AVISITN, assay) %>% 
+  arrange(ARM, USUBJID, AVISITN) %>% 
+  unnest(cols = assay) |> 
+  pivot_wider(id_cols = c(ARM, USUBJID), names_from = AVISITN, values_from = -c(ARM, USUBJID, AVISITN)) 
+
+BC_distances <- 
+  vegan::vegdist(
+    topics_wide |>  select(-c(ARM, USUBJID), -ends_with("_0")), method = "bray", na.rm = TRUE
+  )
+eucl_distances <- 
+  vegan::vegdist(
+    topics_wide |>  select(-c(ARM, USUBJID), -ends_with("_0")), method = "euclidean", na.rm = TRUE
+  ) 
+
+picked_distance <- BC_distances
+
+traj_hclust <- hclust(picked_distance, method = "complete") # if we cut into clusters, the complete method would be better
+traj_hclust <- hclust(picked_distance, method = "single") # but the single linkage method might be better for downstream visualizations if we don't cut into clusters
+
+```
+
+There are several way to display the hierarchical clustering results.
+
+We can simply order participants following the clustering's suggested order and add a vertical strip next to the trajectories to indicate the participant's arm.
+
+```{r}
+#| fig-width: 5
+
+hclust_order <- 
+  tibble(
+    USUBJID = topics_wide$USUBJID[traj_hclust$order]
+  ) %>% 
+  mutate(order = row_number())
+
+topics_with_hclust <- 
+  left_join(topics_long, hclust_order, by = join_by(USUBJID))
+
+g_traj <- 
+  ggplot(topics_with_hclust, 
+         aes(x = AVISITN %>% get_visit_labels(), y = order, fill = topic, alpha = prop)) +
+  geom_tile() +
+  scale_alpha(range = c(0, 1)) +
+  scale_fill_manual(values = get_topic_colors(topics$assay %>% colnames())) +
+  scale_y_discrete("Participants", breaks = NULL) +
+  scale_x_discrete("Visits") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = "left")
+
+g_arm <- 
+  ggplot(topics_with_hclust, aes(x = factor("Arm"), y = order, fill = ARM)) +
+  geom_tile() +
+  scale_y_discrete("", breaks = NULL) + xlab("") +
+  scale_fill_manual("",values = c("dodgerblue2", "indianred1"))
+
+g_traj + g_arm + plot_layout(widths = c(5,1))
+
+```
+
+We can also split trajectories by arm.
+
+```{r}
+#| label: trajectories-by-arm
+#| fig-width: 5
+
+hclust_order <- 
+  tibble(
+    USUBJID = topics_wide$USUBJID[traj_hclust$order],
+    ARM = topics_wide$ARM[traj_hclust$order]
+  ) %>% 
+  mutate(clust_order = row_number()) %>% 
+  arrange(ARM, clust_order) %>% 
+  group_by(ARM) %>% 
+  mutate(order = row_number()) %>% 
+  ungroup()
+
+topics_with_hclust <- 
+  left_join(topics_long, hclust_order, by = join_by(USUBJID, ARM))
+
+g_traj_arm <- 
+  ggplot(topics_with_hclust, 
+         aes(x = AVISITN %>% get_visit_labels(), y = order, fill = topic, alpha = prop)) +
+  geom_tile() +
+  scale_alpha(range = c(0, 1)) +
+  scale_fill_manual(
+    "Sub-community",
+    values = get_topic_colors(topics$assay %>% colnames()),
+    labels = 
+      str_c(topics$assay %>% colnames()," (", 
+            c("L. crisp.", "L. iners", "BVAB1, Prev., Mobil.,...","Gardn., Atob.,...",
+              "Prev. amni & temon., Snaethia", "Prev. bivia, Gemella,..", 
+              "L. jensenii", "other L."), ")")
+  ) +
+  scale_y_discrete("Participants\n(ordered by hier. clustering on BC diss.)", breaks = NULL) +
+  scale_x_discrete("") +
+  facet_grid(ARM ~ ., scales = "free", space = "free") +
+  guides(alpha = "none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+g_traj_arm
+
+```
+
+```{r}
+
+
+g_traj_arm_stacked <- 
+  topics_with_hclust |> 
+  mutate(visit = AVISITN %>% get_visit_labels()) |> 
+  ggplot(aes(x = prop, y = order |> factor(), fill = topic)) +
+  geom_col() + 
+  scale_fill_manual(
+    "Subcommunity", values = get_topic_colors(topics$assay %>% colnames())
+  ) +
+  scale_y_discrete("Participants\n(ordered by hier. clustering on BC diss.)", breaks = NULL) +
+  facet_grid(ARM ~ visit, scales = "free", space = "free") +
+  guides(alpha = "none") +
+  scale_x_continuous("proportions", breaks = seq(0, 1, l = 3), labels = c(0, 0.5, 1)) +
+  theme(
+    strip.text = element_text(color = "black"), 
+    strip.background = element_rect(fill = "gray80")
+  )
+
+g_traj_arm_stacked
+
+```
+
+
+```{r}
+
+
+tmp <- 
+  topics_with_hclust |> 
+  select(Barcode, topic, prop, USUBJID, ARM, AVISITN, order) |> 
+  mutate(visit = AVISITN |> get_visit_labels())
+
+topic_score <- 
+  bind_rows(
+    tibble(topic = "I", topic_score = 3),
+    tibble(topic = "III", topic_score = 2),
+    tibble(topic = "VI", topic_score = 1),
+    tibble(topic = "V", topic_score = 0),
+    tibble(topic = "IV-A", topic_score = -4),
+    tibble(topic = "IV-B", topic_score = -3),
+    tibble(topic = "IV-O.a", topic_score = -2),
+    tibble(topic = "IV-O.b", topic_score = -1),
+  ) |> 
+  mutate(topic = topic |> factor(levels = levels(tmp$topic)))
+
+visit_score <- 
+  bind_rows(
+    tibble(AVISITN = 0, visit_score = 1),
+    tibble(AVISITN = 1, visit_score = 0),
+    tibble(AVISITN = 2, visit_score = 1),
+    tibble(AVISITN = 3, visit_score = 2),
+    tibble(AVISITN = 4, visit_score = 3),
+    tibble(AVISITN = 7, visit_score = 4),
+  )
+
+tmp <- 
+  tmp |> 
+  left_join(topic_score, by = join_by(topic)) |>  
+  left_join(visit_score, by = join_by(AVISITN)) |> 
+  mutate(score = topic_score * prop * visit_score) |> 
+  group_by(USUBJID) |>  mutate(total_score = sum(score)) |> ungroup() |> 
+  mutate(USUBJID = USUBJID |> factor() |> fct_reorder(total_score))
+
+g_traj_arm_stacked_2 <- 
+  tmp |> 
+  ggplot(aes(x = prop, y = USUBJID)) +
+  #geom_segment(data = tibble(USUBJID = tmp$USUBJID), aes(x = -Inf, xend = Inf, y = USUBJID, yend = USUBJID), color = "gray") +
+  #coord_cartesian(clip = "off") +
+  geom_col(aes(fill = topic)) + 
+  scale_fill_manual(
+    "Subcommunity", values = get_topic_colors(topics$assay %>% colnames())
+  ) +
+  scale_y_discrete("Participants\n(ordered by microbiota composition)", breaks = NULL) +
+  facet_grid(ARM ~ visit, scales = "free", space = "free") +
+  guides(alpha = "none") +
+  scale_x_continuous("proportions", breaks = seq(0, 1, l = 3), labels = c(0, 0.5, 1)) +
+  theme(
+    strip.text = element_text(color = "black"), 
+    strip.background = element_rect(fill = "gray80")
+  )
+
+g_traj_arm_stacked_2
+
+```
+
+
+
+
+We can also cut the tree and show the clusters.
+To cut the tree, we need to decide on a number of clusters. To do so, we compare the results of several methods for identifying the optimal number of clusters.
+
+```{r}
+#| fig-width: 5
+#| fig-height: 3.5
+
+# Elbow method
+fviz_nbclust(picked_distance %>% as.matrix(), hcut, method = "wss", k.max = 20)  +
+  labs(subtitle = "Elbow method") # 5?
+
+# Silhouette method
+fviz_nbclust(picked_distance %>% as.matrix(), hcut, method = "silhouette", k.max = 20)+
+  labs(subtitle = "Silhouette method") # 9?
+
+# Gap statistic
+# Use verbose = FALSE to hide computing progression.
+# increase `nboot` for better and more stable results
+#set.seed(123)
+#fviz_nbclust(picked_distance %>% as.matrix(), hcut, nstart = 25,  method = "gap_stat", nboot = 100, k.max = 20)+
+#  labs(subtitle = "Gap statistic method")
+
+n_clust <- 5
+
+```
+
+With the pre-processing options used so far, there isn't a clear answer - probably because there are no clear / well isolated clusters: trajectories lie on a continuum.
+We can use k = `r n_clust`.
+
+
+```{r}
+
+traj_hclust <- hclust(picked_distance, method = "complete") 
+
+hclust_order <- 
+  tibble(
+    USUBJID = topics_wide$USUBJID,
+    ARM = topics_wide$ARM,
+    cluster = cutree(traj_hclust, n_clust)
+  )[traj_hclust$order,] %>% 
+  mutate(clust_order = row_number()) %>% 
+  arrange(ARM, cluster, clust_order) %>% 
+  group_by(ARM, cluster) %>% 
+  mutate(order = row_number()) %>% 
+  ungroup()
+
+topics_with_hclust <- 
+  left_join(topics_long, hclust_order, by = join_by(USUBJID, ARM))
+
+ggplot(topics_with_hclust, 
+       aes(x = AVISITN %>% get_visit_labels(), y = -order, fill = topic, alpha = prop)) +
+  geom_tile() +
+  scale_alpha(range = c(0, 1)) +
+  scale_fill_manual(values = get_topic_colors(topics$assay %>% colnames())) +
+  scale_y_discrete("Participants", breaks = NULL) +
+  scale_x_discrete("Visits") +
+  facet_grid(cluster ~ ARM, scales = "free", space = "free") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+And finally, we can cut by cluster and add a vertical colored strip to indicate the arm.
+
+```{r}
+
+hclust_order <- 
+  tibble(
+    USUBJID = topics_wide$USUBJID,
+    ARM = topics_wide$ARM,
+    cluster = cutree(traj_hclust, n_clust)
+  )[traj_hclust$order,] %>% 
+  mutate(order = row_number()) 
+
+topics_with_hclust <- 
+  left_join(topics_long, hclust_order, by = join_by(USUBJID, ARM))
+
+g_traj_clust <- 
+  ggplot(topics_with_hclust, 
+         aes(x = AVISITN %>% get_visit_labels(), y = -order, fill = topic, alpha = prop)) +
+  geom_tile() +
+  scale_alpha(range = c(0, 1)) +
+  scale_fill_manual(values = get_topic_colors(topics$assay %>% colnames())) +
+  scale_y_discrete("Participants", breaks = NULL) +
+  scale_x_discrete("Visits") +
+  facet_grid(cluster ~ ., scales = "free", space = "free") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "left")
+
+g_arm <- 
+  ggplot(topics_with_hclust, 
+         aes(x = "Arm", y = -order, fill = ARM)) +
+  geom_tile() +
+  facet_grid(cluster ~ ., scales = "free", space = "free") +
+  scale_y_discrete("", breaks = NULL) +
+  scale_x_discrete("") +
+  scale_fill_manual("Study arm", values = get_arm_colors())
+
+g_traj + g_arm + plot_layout(widths = c(5,1))
+
+```
+
+
+
+```{r}
+#| eval: false
+# If we want to add the dendrogram later
+
+library(ggdendro)
+
+g_dendro <- 
+  ggdendrogram(traj_hclust, rotate = TRUE, theme_dendro = TRUE)
+
+g_traj + g_dendro
+
+```
+
+From these visualizations, we observe that there are large shifts post-MTZ, as well as at week 4. Compositions appear more "stable" from week4.
+
+We confirm these observations by describing the post-MTZ composition and by computing BC distances consecutive visits.
+
+
+#### Different order
+
+Instead of clustering, we may want to use a different order.
+
+```{r}
+
+participant_order <- 
+  topics_long |> 
+  mutate(
+    t = topic |> as.numeric(),
+    v = AVISITN |> as.numeric(),
+    w = prop * v
+  ) |> 
+  group_by(USUBJID) |> 
+  summarize(i = weighted.mean(t, w)) |> 
+  arrange(-i)
+
+
+
+g_traj_arm_stacked_ordered <- 
+  topics_with_hclust |> 
+  mutate(
+    visit = AVISITN |> get_visit_labels(),
+    USUBJID = USUBJID |> factor(levels = participant_order$USUBJID),
+    topic = topic
+  ) |> 
+  ggplot(aes(x = prop, y = USUBJID, fill = topic)) +
+  geom_col() + 
+  scale_fill_manual(
+    "Subcommunity", values = get_topic_colors(topics$assay %>% colnames())
+  ) +
+  scale_y_discrete("Participants\n(ordered by hier. clustering on BC diss.)", breaks = NULL) +
+  facet_grid(ARM ~ visit, scales = "free", space = "free") +
+  guides(alpha = "none") +
+  scale_x_continuous(
+    "proportions", breaks = seq(0, 1, l = 3), labels = c(0, 0.5, 1)
+  ) +
+  theme(
+    strip.text = element_text(color = "black"), 
+    strip.background = element_rect(fill = "gray80"),
+    panel.spacing.x = unit(1, "pt"),
+    panel.border = element_blank()
+  )
+
+g_traj_arm_stacked_ordered
+
+```
+
+
+```{r}
+
+taxa_sub_long <- 
+  get_assay_long_format(mae, "c_taxa_topics_16S")
+
+taxa_sub_long_filtered <- 
+  taxa_sub_long |> 
+  filter(PIPV) |> 
+  group_by(USUBJID) |> 
+  mutate(n_visits = AVISITN |> unique() |> length()) |> 
+  ungroup() |> 
+  filter(n_visits >= 4) 
+
+taxa_sub_long_filtered <- 
+  taxa_sub_long_filtered |> 
+  mutate(
+    feature_weight = 
+      case_when(
+        feature == "L. crispatus" ~ 1,
+        feature %in% c("L. iners", "L. jensenii", "Lactobacillus (other)") ~ 0.5,
+        TRUE ~ 0
+      ),
+    visit_weight = 
+      case_when(
+        AVISITN == 7 ~ 2,
+        AVISITN %in% c(2:6) ~ 1,
+        AVISITN == 1 ~ 0.5,
+        TRUE ~ 0
+      ),
+    weighted_value = value * feature_weight * visit_weight
+  ) |> 
+  group_by(USUBJID) |> 
+  mutate(score = sum(weighted_value)) |> 
+  ungroup() |> 
+  arrange(score) |> 
+  mutate(USUBJID = USUBJID |> fct_inorder()) 
+
+g_traj_taxa_sub <- 
+  taxa_sub_long_filtered |> 
+  ggplot(aes(x = value, y = USUBJID, fill = feature)) +
+  geom_col() +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels(), scales = "free_y", space = "free_y") +
+  scale_fill_manual(
+    "", values = taxa_sub_long_filtered$feature |> levels() |> get_topic_colors(),
+    guide = guide_legend(nrow = 4)
+  ) +
+  scale_x_continuous("Proportions", breaks = seq(0, 1, l = 3), labels = c(0, 0.5, 1), expand = expansion(0,0)) +
+  scale_y_discrete("Participants, ordered by microbiota trajectories", breaks = NULL) 
+
+g_traj_taxa_sub
+
+```
+
+
+
+
+```{r}
+
+taxa_sub_long_primary_endpoint <- 
+  taxa_sub_long |> 
+  filter(AVISITN == 4) |> 
+  left_join(
+    get_assay_long_format(mae, "endpoints", feature_name = "xxx", values_name = "category", add_colData = FALSE),
+    by = join_by(Barcode)
+  ) |> 
+  select(Barcode, USUBJID, ARM, feature, value, category, starts_with("BV")) |> 
+  mutate(
+    `BV diagnosis` = ifelse(BV == "Yes", "Positive", "Negative")
+  )
+
+taxa_sub_long_primary_endpoint <- 
+  taxa_sub_long_primary_endpoint |>
+  mutate(
+    feature_weight = 
+      case_when(
+        feature == "L. crispatus" ~ 1,
+        TRUE ~ 0
+      ),
+    weighted_value = value * feature_weight
+  ) |> 
+  group_by(USUBJID) |> 
+  mutate(score = sum(weighted_value)) |>
+  ungroup() |>
+  arrange(-score) |>
+  mutate(USUBJID = USUBJID |> fct_inorder(), category = category |> fct_inorder())
+
+
+```
+
+```{r}
+
+g_primary_endpoint_LV <- 
+  taxa_sub_long_primary_endpoint |> 
+  filter(ARM == "LACTIN-V") |> 
+  ggplot(aes(x = USUBJID)) +
+  geom_col(aes(y = value, fill = feature), col = NA) +
+  geom_point(
+    data = taxa_sub_long_primary_endpoint |> filter(ARM == "LACTIN-V") |> select(USUBJID, category, ARM,`BV diagnosis`) |> distinct(),
+    aes(y = -0.025, col = `BV diagnosis`), shape = 15, size = 2
+  ) +
+  facet_grid(ARM ~ category, scales = "free_x", space = "free_x") +
+  scale_fill_manual(
+    "", values = taxa_sub_long_filtered$feature |> levels() |> get_topic_colors(),
+    guide = guide_legend(nrow = 4)
+  ) +
+  scale_color_manual(
+    values = c("Positive" = "red", "Negative" = "lightsteelblue"), na.value = "transparent"
+  ) +
+  scale_y_continuous("Relative Abundance", labels = scales::label_percent(), expand = expansion(add = c(0.01, 0),0)) +
+  scale_x_discrete("", breaks = NULL) +
+  theme(strip.text.y = element_text(angle = -90, hjust = 0.5))
+
+g_primary_endpoint_P <- 
+  taxa_sub_long_primary_endpoint |> 
+  filter(ARM != "LACTIN-V") |> 
+  ggplot(aes(x = USUBJID)) +
+  geom_col(aes(y = value, fill = feature), col = NA) +
+  geom_point(
+    data = taxa_sub_long_primary_endpoint |> filter(ARM != "LACTIN-V") |> select(USUBJID, category, ARM,`BV diagnosis`) |> distinct(),
+    aes(y = -0.025, col = `BV diagnosis`), shape = 15, size = 2
+  ) +
+  facet_grid(ARM ~ category, scales = "free_x", space = "free_x") +
+  scale_fill_manual(
+    "", values = taxa_sub_long_filtered$feature |> levels() |> get_topic_colors(),
+    guide = guide_legend(nrow = 4)
+  ) +
+  scale_color_manual(
+    values = c("Positive" = "red", "Negative" = "lightsteelblue"), na.value = "transparent"
+  ) +
+  scale_y_continuous("Relative Abundance", labels = scales::label_percent(), expand = expansion(add = c(0.01, 0),0)) +
+  scale_x_discrete("Participants, ordered by microbiota composition", breaks = NULL) +
+  theme(strip.text.y = element_text(angle = -90, hjust = 0.5))
+
+
+```
+
+
+```{r}
+#| fig-width: 7
+#| fig-height: 7
+
+g_primary_endpoint_LV +
+  g_primary_endpoint_P +
+  plot_layout(nrow = 2, guides = "collect")
+
+```
+
+
+
+
+
+### Subcommunities distribution at each visits (summaries)
+
+
+
+```{r}
+
+topics_long <- 
+  get_assay_long_format(mae, "c_topics_16S_8")
+
+```
+
+```{r}
+#| fig-height: 8
+#| fig-width: 10
+#|
+
+
+topics_long |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = feature, y = value, fill = feature, col = feature)) +
+  geom_boxplot(outlier.size = 0.25, alpha = 0.5) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_fill_manual("", values = get_topic_colors(levels(topics_long$feature))) +
+  scale_color_manual("", values = get_topic_colors(levels(topics_long$feature))) +
+  ylab("Relative abundance") +
+  scale_x_discrete("Subcommunity", breaks = NULL) +
+  guides(col = "none", fill = "none") + 
+  
+  topics_long |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = feature, y = value, fill = feature)) +
+  geom_col() +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_fill_manual("", values = get_topic_colors(levels(topics_long$feature))) +
+  ylab("Cummulative relative abundance") +
+  scale_x_discrete("Subcommunity", breaks = NULL)  +
+  
+  plot_layout(nrow = 2, guides = "collect") +
+  plot_annotation(tag_levels = "a")
+
+```
+
+
+
+
+
+
+### Post-MTZ composition
+
+```{r}
+
+topics_long %>% 
+  filter(AVISITN == 1) %>% 
+  ggplot(., aes(x = value, fill = feature)) +
+  geom_vline(xintercept = c(0, 0.5, 1), col = "gray", linetype = 2) +
+  geom_histogram(binwidth = 0.05) +
+  facet_wrap(feature ~ ., nrow = 3) +
+  scale_fill_manual(values = get_topic_colors(levels(topics_long$feature))) +
+  guides(fill = "none") +
+  xlab("post-MTZ topic proportion")
+
+```
+
+
+
+```{r}
+
+post_mtz <- topics_all %>% filter(AVISITN == 1)
+
+post_mtz <- 
+  post_mtz %>% 
+  mutate(
+    all_L = assay$I + assay$III + assay$V + assay$VI, 
+    category = 
+      case_when(
+        assay$III > 0.5 ~ "L. iners",
+        assay$V > 0.5 ~ "L. jensenii",
+        assay$I > 0.5 ~ "L. crispatus",
+        all_L > 0.5 ~ "L. (mix)",
+        TRUE ~ "non-Lacto."
+      ) %>% 
+      factor(., levels = c("L. iners", "L. jensenii", "L. crispatus", "L. (mix)", "non-Lacto."))
+  )
+
+res_post_mtz <- 
+  bind_rows(
+    post_mtz %>% select(USUBJID, category, ARM),
+    post_mtz %>% select(USUBJID, category) %>% mutate(ARM = "both arms")
+  )
+
+post_mtz_table <- 
+  table(`dominated by` = res_post_mtz$category, Arm = res_post_mtz$ARM) %>%
+  as_tibble() %>% 
+  group_by(Arm) %>% 
+  mutate(tot = sum(n), perc = 100 * n / tot, `% (n)` = str_c(round(perc), " (",n,") ")) %>% 
+  select(-n, -tot, -perc) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = Arm, values_from = c(`% (n)`), names_glue = "{.value} [{Arm}]",)
+
+post_mtz_table |>  kableExtra::kable(booktab = TRUE, digits = 0, caption = "Post-MTZ composition.\nHere, a sample is considered dominated by a species (or a mix of species) if that species made up at least 50% of that sample.") 
+
+post_mtz_table |> gt(caption = "Post-MTZ composition.\nHere, a sample is considered dominated by a species (or a mix of species) if that species made up at least 50% of that sample.")
+
+```
+
+> Not the right place for this analysis, but checking how many participants with L. jensenii post-MTZ end up with rBV.
+
+```{r}
+
+# first, we compare the CSTs and the categories defined above
+
+csts <- get_assay_long_format(mae, "CST") %>% filter(feature == "CST")
+
+csts <- 
+  csts %>% 
+  filter(AVISITN == 1) %>% 
+  select(Barcode, value) %>% 
+  left_join(post_mtz, by = "Barcode")
+
+table(category = csts$category, CST = csts$value)
+
+```
+
+We see that 2/3 of the post-MTZ CST V samples have > 50% L.jensenii.
+
+```{r}
+
+# then we check the distribution of CSTs post-MTZ
+
+table(CST = csts$value, ARM = csts$ARM) %>% as_tibble() %>% 
+  group_by(ARM) %>% 
+  mutate(tot = sum(n), perc = 100 * n / tot) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = ARM, values_from = c(tot, n, perc)) %>% 
+  kableExtra::kable(booktab = TRUE, digits = 2, caption = "post-MTZ composition in terms of CSTs")
+
+
+# and finally, we check how many people end up with BV based on the post-MTZ categories or based on the CSTs
+
+any_bv_diagnosis <- 
+  clin %>% filter(AVISITN >= 2) %>% 
+  select(USUBJID, BV, BV_WC) %>% 
+  group_by(USUBJID) %>% 
+  summarize(
+    any_BV = any(BV == "Yes", na.rm = TRUE), 
+    any_BV_2 = any(BV_WC == "Yes", na.rm = TRUE),
+    .groups = "drop")
+
+post_mtz_with_BV <- 
+  post_mtz %>% 
+  left_join(any_bv_diagnosis, by = join_by(USUBJID)) %>% 
+  left_join(csts %>% select(USUBJID, value) %>% dplyr::rename(CST = value), 
+            by = join_by(USUBJID))
+
+table(category = post_mtz_with_BV$category, 
+      any_BV = post_mtz_with_BV$any_BV, 
+      ARM = post_mtz_with_BV$ARM)
+
+table(CST = post_mtz_with_BV$CST, 
+      any_BV = post_mtz_with_BV$any_BV, 
+      ARM = post_mtz_with_BV$ARM)
+
+```
+
+```{r}
+
+# Correlation between post-MTZ microbiota composition and total load
+
+topics_wide_postMTZ <- 
+  topics_long |> 
+  filter(AVISITN == 1) |> 
+  select(USUBJID, feature, value, LOAD) |> 
+  pivot_wider(names_from = feature, values_from = value, names_prefix = "t_") |> 
+  mutate(log_load = log10(LOAD + 1)) |> 
+  drop_na()
+
+m <- lm(log_load ~ t_I + t_III + `t_IV-A` + `t_IV-B` + `t_IV-O.a` + `t_IV-O.b` + t_V + t_VI, data = topics_wide_postMTZ)
+m |> summary()
+
+tibble(log_load = topics_wide_postMTZ$log_load, log_load_hat = m$fitted.values) |> 
+  ggplot(aes(x = log_load, y = log_load_hat)) +
+  geom_point() +
+  geom_smooth()
+
+set.seed(12345)
+RV.randtest(df1 = topics_wide_postMTZ |> select(starts_with("t_")), 
+            df2 = topics_wide_postMTZ |> select(log_load))
+
+
+ggplot(topics_wide_postMTZ, aes(x = t_III, y = log_load)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+ggplot(topics_wide_postMTZ, aes(x = t_I + t_III + t_V + t_VI, y = log_load)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm")
+
+
+topics_wide_postMTZ <- 
+  topics_long |> 
+  filter(AVISITN == 1) |> 
+  select(USUBJID, feature, value, pH) |> 
+  pivot_wider(names_from = feature, values_from = value, names_prefix = "t_") |> 
+  drop_na()
+
+m <- lm(pH ~ t_I + t_III + `t_IV-A` + `t_IV-B` + `t_IV-O.a` + `t_IV-O.b` + t_V + t_VI, data = topics_wide_postMTZ)
+m |> summary()
+
+tibble(pH = topics_wide_postMTZ$pH, pH_hat = m$fitted.values) |> 
+  ggplot(aes(x = pH, y = pH_hat)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+set.seed(12345)
+RV.randtest(df1 = topics_wide_postMTZ |> select(starts_with("t_")), 
+            df2 = topics_wide_postMTZ |> select(pH))
+
+
+tmp <- 
+  clin |> filter(AVISITN == 1) |> select(USUBJID, pH, LOAD) |> drop_na() 
+tmp |> 
+  ggplot(aes(x = pH, y = log10(LOAD+1))) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+cor(tmp$pH, log10(tmp$LOAD+1))
+
+
+
+```
+
+
+
+
+
+### Stability over time.
+
+
+> TODO: fix `compute_BC_between_successive_visits` so that it takes `mae` and `assay_name` as options
+
+```{r}
+
+BC_between_visits <- 
+  compute_BC_between_successive_visits(mae, assayname = "ASV_16S_filtered", v = c(0:4,7))  |> 
+  left_join(clin |> select(USUBJID, ARM) |> distinct(), by = join_by(USUBJID)) 
+
+BC_between_visits <- 
+  BC_between_visits %>% 
+  mutate(
+    v1_label = get_visit_labels(v1),
+    v2_label = get_visit_labels(v2),
+    id = str_c(v1_label, "\nto ", v2_label),
+    id = id |> factor(levels = unique(id))
+  )
+
+```
+
+
+```{r}
+#| label: stability over time
+#| fig-height: 3
+
+g_BC_successive <- 
+  ggplot(BC_between_visits, aes(x = id, y = BC, fill = ARM, col = ARM)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.5) +
+  xlab("") +
+  ylab("Bray-Curtis diss.\nconsecutive v.") +
+  scale_fill_manual("Study arm", values = get_arm_colors()) +
+  scale_color_manual("Study arm", values = get_arm_colors()) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+g_BC_successive
+
+```
+
+
+We observe that the largest longitudinal shifts in composition occur after MTZ and after the 4 first weeks of the intervention (and more so in the LACTIN-V arm). From week 4, the distribution of dissimilarities is lower, indicating that most participants have a stable microbiota.
+
+```{r}
+
+BC_between_visits_with_endpoints <- 
+  BC_between_visits |> 
+  left_join(
+    get_assay_long_format(mae, "endpoints", add_colData = FALSE, values_name = "endpoints") |> 
+      select(Barcode, endpoints) |> 
+      mutate(endpoints = endpoints |> factor(levels = c("≥ 50% L. crispatus", "≥ 50% Lactobacillus", "< 50% Lactobacillus"))) |> 
+      rename(Barcode_v1 = Barcode, endpoints_v1 = endpoints),
+    by = join_by(Barcode_v1)
+  ) |> 
+  left_join(
+    get_assay_long_format(mae, "endpoints", add_colData = FALSE, values_name = "endpoints") |> 
+      select(Barcode, endpoints) |> 
+      mutate(endpoints = endpoints |> factor(levels = c("≥ 50% L. crispatus", "≥ 50% Lactobacillus", "< 50% Lactobacillus"))) |> 
+      rename(Barcode_v2 = Barcode, endpoints_v2 = endpoints),
+    by = join_by(Barcode_v2)
+  )
+
+```
+
+
+```{r}
+#| fig-height: 8
+#| fig-width: 10
+
+BC_between_visits_with_endpoints |> 
+  ggplot(aes(x = id, y = BC, fill = endpoints_v1, col = endpoints_v1)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.5, varwidth = TRUE) +
+  facet_grid(ARM ~ .) +
+  xlab("") +
+  ylab("Bray-Curtis diss.\nconsecutive v.") +
+  scale_fill_manual("Microbiota endpoint at the previous visit", values = get_topic_colors(c("I","III","IV"))) +
+  scale_color_manual("Microbiota endpoint at the previous visit", values = get_topic_colors(c("I","III","IV"))) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  ) +
+  
+  BC_between_visits_with_endpoints |> 
+  ggplot(aes(x = id, y = BC, fill = endpoints_v2, col = endpoints_v2)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.5, varwidth = TRUE) +
+  facet_grid(ARM ~ .) +
+  xlab("") +
+  ylab("Bray-Curtis diss.\nconsecutive v.") +
+  scale_fill_manual("Microbiota endpoint at the next visit", values = get_topic_colors(c("I","III","IV"))) +
+  scale_color_manual("Microbiota endpoint at the next visit", values = get_topic_colors(c("I","III","IV"))) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  ) +
+  
+  plot_layout(nrow = 2) + plot_annotation(tag_levels = "a")
+
+```
+
+
+
+```{r}
+
+topics_long |> 
+  filter(feature == "I") |> 
+  filter(ARM == "LACTIN-V") |> 
+  mutate(visit = AVISITN |> get_visit_labels()) |> 
+  ggplot(aes(x = value, fill = feature)) +
+  geom_histogram(position = "identity") +
+  facet_grid(feature ~ visit)
+
+
+topics_long |> 
+  # filter(topic == "I") |> 
+  filter(ARM == "LACTIN-V") |> 
+  mutate(visit = AVISITN |> get_visit_labels()) |> 
+  ggplot(aes(y = value, x = visit, col = feature)) +
+  geom_jitter(height = 0, width = 0.1, alpha = 0.5, size = 0.5) +
+  facet_grid(feature ~ .)
+
+```
+
+
+```{r}
+
+endpoints_long <- 
+  get_assay_long_format(mae, "endpoints", values_name = "endpoint category") |> 
+  mutate(`endpoint category` =  `endpoint category` |> fct_inorder())
+
+endpoints_long |> 
+  filter(PIPV) |> 
+  group_by(AVISITN, ARM) |> mutate(total = n()) |> ungroup() |> 
+  group_by(ARM) |> mutate(total = max(total)) |> ungroup() |> 
+  group_by(AVISITN, ARM, `endpoint category`, total) |> summarize(n = n(), .groups = "drop") |> 
+  mutate(`Fraction of participants` = n/total) |> 
+  ggplot() +
+  aes(x = get_visit_labels(AVISITN), y = `Fraction of participants`, fill = `endpoint category`) +
+  geom_col() +
+  facet_grid(ARM ~ .) +
+  scale_fill_manual(values = get_topic_colors(c("I","III","IV") |> rev()), na.value = rgb(0,0,0,0.1)) +
+  xlab("Visits")
+
+```
+
+
+
+### Microbiota trajectories figure
+
+
+We add the total bacterial load for the full figure
+
+```{r}
+
+df_load <- 
+  clin %>% filter(AVISITN %in% c(1:4,7)) %>% 
+  mutate(
+    Visit = 
+      get_visit_labels(AVISITN) %>% fct_drop() %>% 
+      fct_expand("Pre-MTZ", after = 0)
+  )
+
+
+g_load <- 
+  ggplot(df_load, aes(x = Visit, y = LOAD + 1, fill = ARM, col = ARM)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.5) +
+  ylab("Total\nload") + scale_y_log10() +
+  scale_x_discrete("", drop = FALSE) + 
+  scale_fill_manual("Study arm", values = get_arm_colors()) +
+  scale_color_manual("Study arm", values = get_arm_colors()) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+
+```{r}
+#| fig-height: 8
+#| fig-width: 5
+
+(g_load + theme(legend.position = "left")) + plot_spacer() +
+  g_traj_clust + (g_arm + guides(fill = "none"))  +
+  (g_BC_successive + guides(col = "none", fill = "none")) + plot_spacer() +
+  plot_layout(nrow = 3, ncol = 2, widths = c(5,1), heights = c(1,5,1))
+
+```
+
+
+```{r}
+#| fig-height: 8
+#| fig-width: 6
+
+(g_load + theme(axis.text.x = element_blank(), legend.justification = 0)) +
+  plot_spacer() +
+  (g_traj_arm + theme(legend.justification = 0)) +
+  plot_spacer() +
+  (g_BC_successive + guides(col = "none", fill = "none") + theme(legend.justification = 0)) +
+  plot_layout(ncol = 1, heights = c(0.7, -0.5, 5, -0.4, 1))
+
+```
+
+
+
+```{r}
+#| fig-height: 8
+#| fig-width: 6
+
+(g_load + theme(axis.text.x = element_blank(), legend.justification = 0)) +
+  plot_spacer() +
+  (g_traj_arm_stacked_2 + theme(legend.justification = 0)) +
+  plot_spacer() +
+  (g_BC_successive + guides(col = "none", fill = "none") + theme(legend.justification = 0)) +
+  plot_layout(ncol = 1, heights = c(0.7, -0.4, 5, -0.2, 1))
+
+```
+
+
+
+```{r}
+
+tmp <- 
+  get_assay_long_format(mae, "c_topics_16S_8", feature_name = "topic", values_name = "prop") |> 
+  filter(PIPV) |>
+  group_by(USUBJID) |> mutate(n_visits = AVISITN |> unique() |> length()) |> ungroup() |>
+  filter(n_visits > 3) |> 
+  select(Barcode, topic, prop, USUBJID, ARM, AVISITN) |> 
+  mutate(visit = AVISITN |> get_visit_labels()) 
+
+topic_score <- 
+  bind_rows(
+    tibble(topic = "I", topic_score = 3),
+    tibble(topic = "III", topic_score = 2),
+    tibble(topic = "VI", topic_score = 1),
+    tibble(topic = "V", topic_score = 0),
+    tibble(topic = "IV-A", topic_score = -4),
+    tibble(topic = "IV-B", topic_score = -3),
+    tibble(topic = "IV-O.a", topic_score = -2),
+    tibble(topic = "IV-O.b", topic_score = -1),
+  ) |> 
+  mutate(topic = topic |> factor(levels = levels(tmp$topic)))
+
+visit_score <- 
+  bind_rows(
+    tibble(AVISITN = 0, visit_score = 1),
+    tibble(AVISITN = 1, visit_score = 0),
+    tibble(AVISITN = 2, visit_score = 1),
+    tibble(AVISITN = 3, visit_score = 2),
+    tibble(AVISITN = 4, visit_score = 3),
+    tibble(AVISITN = 7, visit_score = 4),
+  )
+
+tmp <- 
+  tmp |> 
+  left_join(topic_score, by = join_by(topic)) |>  
+  left_join(visit_score, by = join_by(AVISITN)) |> 
+  mutate(score = topic_score * prop * visit_score) |> 
+  group_by(USUBJID) |>  mutate(total_score = sum(score)) |> ungroup() |> 
+  mutate(USUBJID = USUBJID |> factor() |> fct_reorder(total_score))
+
+g_subcommunities_traj <- 
+  tmp |> 
+  ggplot(aes(x = prop, y = USUBJID)) +
+  geom_col(aes(fill = topic)) + 
+  scale_fill_manual("Subcommunity", values = get_topic_colors(topics$assay |> colnames())) +
+  scale_y_discrete("Participants\n(ordered by microbiota composition)", breaks = NULL) +
+  facet_grid(ARM ~ visit, scales = "free", space = "free") +
+  guides(fill = "none") +
+  scale_x_continuous("proportions", breaks = seq(0, 1, l = 3), labels = c(0, 0.5, 1)) +
+  theme(
+    strip.text = element_text(color = "black"), 
+    strip.background = element_rect(fill = "gray80")
+  )
+
+g_subcommunities_traj
+
+```
+
+
+
+```{r}
+
+g_beta <-
+  plot_topic_betas(mae, "c_topics_16S_8") +
+  # xlab("Subcommunity") +
+  scale_size(
+    "p", range = c(0, 10), limits = c(0, 1), 
+    breaks = c(1/100, 1/10, 1/4, 1/2, 1),
+    labels = c("1/100", "1/10","1/4","1/2","1")
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+g_load <- 
+  ggplot(df_load, aes(x = Visit, y = LOAD + 1, fill = ARM, col = ARM)) +
+  geom_boxplot(alpha = 0.5, outlier.size = 0.5) +
+  scale_y_log10("Total\nbacterial load") +
+  scale_x_discrete("", drop = FALSE) + 
+  scale_fill_manual("Study arm", values = get_arm_colors()) +
+  scale_color_manual("Study arm", values = get_arm_colors()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+
+
+g_BC_successive <- 
+  ggplot(BC_between_visits, aes(x = id, y = BC, fill = ARM, col = ARM)) +
+  geom_boxplot(alpha = 0.5, outlier.size = 0.5) +
+  xlab("") +
+  ylab("Bray-Curtis\ndiss.") +
+  scale_fill_manual("Study arm", values = get_arm_colors()) +
+  scale_color_manual("Study arm", values = get_arm_colors()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  +
+  guides(col = "none", fill = "none")
+
+```
+
+```{r}
+#| fig-height: 15
+#| fig-width: 15
+
+design = "
+AB
+AC
+AD
+"
+
+g_beta + theme(legend.position = "top", legend.justification = 1) +
+  g_load + 
+  g_subcommunities_traj + 
+  g_BC_successive +
+  plot_layout(design = design, heights = c(1.5,8,1), widths = c(2,5)) +
+  plot_annotation(tag_levels = "a")
+
+
+```
+
+
+```{r}
+
+BC_between_visits |> 
+  group_by(id, ARM) |> 
+  summarize(median_BC = median(BC), .groups = "drop") |> 
+  gt()
+
+df_load |> 
+  group_by(Visit, ARM) |> 
+  summarize(
+    median_LOAD = (LOAD + 1) |> median(na.rm = TRUE) |> log10(), 
+    IQR_LOAD_lo = (LOAD + 1) |> quantile(0.25, na.rm = TRUE) |> log10(),
+    IQR_LOAD_hi = (LOAD + 1) |> quantile(0.75, na.rm = TRUE) |> log10(),
+    .groups = "drop")
+
+
+df_load |> 
+  mutate(Visit_group = ifelse(Visit == "Post-MTZ", Visit, "Others")) |> 
+  group_by(Visit_group) |> 
+  summarize(
+    median_LOAD = (LOAD + 1) |> median(na.rm = TRUE) |> log10(), 
+    IQR_LOAD_lo = (LOAD + 1) |> quantile(0.25, na.rm = TRUE) |> log10(),
+    IQR_LOAD_hi = (LOAD + 1) |> quantile(0.75, na.rm = TRUE) |> log10(),
+    .groups = "drop")
+
+wilcox.test(
+  (LOAD + 1) ~ Visit_group, 
+  data = 
+    df_load |> 
+    mutate(Visit_group = ifelse(Visit == "Post-MTZ", Visit, "Others"))
+)
+
+
+```
+
+
+## How does early success correlate with later success?
+
+
+```{r}
+
+endpoints_all <- get_assay_long_format(mae, "endpoints", values_name = "microbiota_outcome")
+
+endpoints <- 
+  endpoints_all |> 
+  filter(!is.na(microbiota_outcome))
+
+endpoints_wide <- 
+  endpoints |>
+  arrange(AVISITN) |> 
+  filter(PIPV) |> 
+  pivot_wider(
+    id_cols = c(USUBJID, ARM), 
+    names_from = AVISITN, names_prefix = "outcome_V",
+    values_from = microbiota_outcome
+  )
+
+```
+
+
+```{r}
+
+endpoints_wide |> 
+  filter(outcome_V2 == "≥ 50% L. crispatus", !is.na(outcome_V4)) |> 
+  count(ARM, outcome_V4) |> 
+  group_by(ARM) |> 
+  mutate(total_per_arm = sum(n), perc = (100 * n / total_per_arm) |> round(2)) |> 
+  ungroup() |> 
+  mutate(
+    res = str_c(n, " (", perc |> round(), "%)"),
+    ARM = str_c("n (%) in ", ARM , " arm")
+  ) |>
+  select(ARM, outcome_V4, res) |> 
+  pivot_wider(names_from = ARM, values_from = res) |>
+  rename(`Microbiota outcome at week 12` = outcome_V4) |> 
+  gt()
+
+endpoints_wide |> 
+  filter(outcome_V2 == "≥ 50% L. crispatus", !is.na(outcome_V7)) |> 
+  count(ARM, outcome_V7) |> 
+  group_by(ARM) |> 
+  mutate(total_per_arm = sum(n), perc = (100 * n / total_per_arm) |> round(2)) |> 
+  ungroup() |> 
+  mutate(
+    res = str_c(n, " (", perc |> round(), "%)"),
+    ARM = str_c("n (%) in ", ARM , " arm")
+  ) |>
+  select(ARM, outcome_V7, res) |> 
+  pivot_wider(names_from = ARM, values_from = res) |>
+  rename(`Microbiota outcome at week 24` = outcome_V7) |> 
+  gt()
+
+```
+
+
+
+

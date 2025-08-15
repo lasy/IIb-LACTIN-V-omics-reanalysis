@@ -1,0 +1,998 @@
+---
+title: "Building the multi-assay experiment object"
+author: Laura Symul
+date: today
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    embed-resources: true
+execute:
+  cache: true # true | refresh
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+```{r}
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(janitor)
+library(gt)
+theme_set(theme_light())
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../R/", source)
+
+
+```
+
+
+```{bash}
+#| eval: false
+
+# We first mount the `Gates LACTIN-V` dropbox folder locally:
+
+
+mkdir -p lactinv_dropbox
+rclone mount lactinv-dropbox:"/Gates LACTIN-V/" "lactinv_dropbox/"
+```
+
+
+
+## Clinical data (`colData`)
+
+The processed clinical data will become the `colData` of the `MultiAssayExperiment` object
+
+```{r}
+
+input_dir <- 
+  str_c(data_dir(), "01_preprocessed/Clinical metadata/") |> 
+  fs::dir_ls() |> 
+  tail(1) |> 
+  str_c("/")
+
+swabs <- readRDS(file = str_c(input_dir, "swabs",".RDS")) # swabs is the list of all shipped swabs
+visits <- readRDS(file = str_c(input_dir, "visits",".RDS"))
+subjects <- readRDS(file = str_c(input_dir, "subjects",".RDS"))
+variable_info <- readRDS(file = str_c(input_dir, "variable_info",".RDS"))
+factor_values <- readRDS(file = str_c(input_dir, "factor_values",".RDS"))
+
+```
+
+From the clinical data cleaning, we have, in the `subjects` table data for `r nrow(subjects)` randomized participants, of which `r sum(subjects$ARM == "Placebo")` are randomized to the Placebo arm.
+
+Note that the Kwon lab was not provided swabs for all randomized participants, but that a few swabs from non-randomized participants were shipped to the Kwon lab for sequencing:
+
+```{r}
+
+swabs |> 
+  select(USUBJID) |> distinct() |> 
+  mutate(swabs_available = TRUE) |> 
+  full_join(subjects |> select(USUBJID, ARM), by = "USUBJID") |> 
+  mutate(
+    swabs_available = swabs_available |> replace_na(FALSE),
+    swabs_available = swabs_available |> ifelse("At least one swab shipped", "No shipped swab"),
+    ARM = ARM |> str_replace_na("Non-randomized") |> fct_infreq()
+    ) |> 
+  dplyr::count(ARM, swabs_available) |> 
+  pivot_wider(names_from = swabs_available, values_from = n) |>
+  gt::gt(
+    caption = "Number of participants with available swabs per arm"
+  ) |> 
+  gt::fmt_missing(columns = everything(), missing_text = "-") 
+  
+```
+
+
+The total number of swabs from randomized and non-randomized participant is as follows:
+
+```{r}
+
+swabs |> 
+  left_join(subjects |> select(USUBJID, ARM), by = "USUBJID") |> 
+  mutate(
+    Randomized = ifelse(!is.na(ARM), "Randomized", "Non-randomized") |> fct_infreq(),
+    Arm = ARM |> str_replace_na("-") |> fct_infreq()) |> 
+  dplyr::count(Randomized, Arm, name = "n swabs") |> 
+  group_by(Randomized) |> 
+  gt::gt(caption = "Total number of swabs available per arm", row_group_as_column = TRUE) |>
+  gt::grand_summary_rows(columns = "n swabs",  fns = list(Total = ~ sum(.)))
+
+
+```
+
+
+These numbers are larger than the number of unique participant study visit if all enrolled participants attended all of their visits and provided swabs as planned (1596 = 228 x 7). This is because several participants had replicates at many of their study visits.
+
+The number of study visit with available swabs is as follow:
+
+```{r}
+
+swabs |> 
+  left_join(subjects |> select(USUBJID, ARM), by = join_by(USUBJID)) |> 
+  mutate(
+    Randomized = ifelse(!is.na(ARM), "Randomized", "Non-randomized") |> fct_infreq(), 
+    Arm = ARM |> str_replace_na("-")
+    ) |>
+  left_join(visits |> select(USUBJID, AVISITN), by = join_by(USUBJID, AVISITN)) |> 
+  dplyr::count(Randomized, Arm, USUBJID, AVISITN) |> 
+  dplyr::count(Randomized, Arm, name = "n study visits") |> 
+  group_by(Randomized) |> 
+  gt::gt(
+    caption = "Number of study visits with available samples (swabs) per arm",
+    row_group_as_column = TRUE
+  ) |>
+  gt::summary_rows(columns = "n study visits",  fns = list(Total = ~ sum(.)))
+
+```
+
+
+
+
+
+```{r}
+
+colData <- 
+  swabs |> 
+  full_join(subjects, by = "USUBJID") |> 
+  mutate(
+    Barcode = ifelse(is.na(Barcode), USUBJID, Barcode), # if no barcode, use USUBJID
+  ) |> 
+  left_join(visits, by = c("USUBJID", "AVISITN")) |> 
+  as.data.frame() |> 
+  mutate(rownames = Barcode) |> 
+  column_to_rownames("rownames") 
+
+```
+
+
+
+
+
+## Assays
+
+### 16S data
+
+#### Raw counts
+
+##### Loading ASV counts from the phyloseq object data
+
+We load the phyloseq object
+
+```{r}
+
+# phyloseq_RDS_file <- "../../16S_data/LactinV_16S_draft_incomplete_2022_09_15.RDS"
+# phyloseq_RDS_file <- "../../16S_data/LactinV_16S_full_data_phyloseq_2023_01_11.RDS"
+phyloseq_RDS_file <- 
+  str_c(data_dir(), "01_preprocessed/16S_data/LactinV_16S_full_data_phyloseq_2023_07_27.RDS")
+ps <- readRDS(phyloseq_RDS_file)
+ps@otu_table[is.na(ps@otu_table)] <- 0
+if ( any(str_detect(rownames(ps@otu_table),"\\.")) ) {
+  rownames(ps@otu_table) <- ps@otu_table %>% rownames() %>% str_remove(.,"\\..*")
+  rownames(ps@sam_data) <- ps@sam_data %>% rownames() %>% str_remove(.,"\\..*")
+}
+
+
+```
+
+```{r}
+ps
+```
+We note that there are only 1177 samples in the `phyloseq` object, which is less than the number of shipped swabs. That is likely because some swabs belonging to the same participant x visit (duplicates) were not sequenced. 
+
+
+We check that the phyloseq object' samples are all contained in the list of shipped swabs (*i.e.*, we check that the list of shipped swab I was provided is "complete").
+
+```{r}
+
+all(rownames(ps@sam_data) %in% swabs$Barcode) # should be TRUE
+
+```
+
+
+The total number of samples with 16S rRNA data from randomized participants is
+
+```{r}
+
+tmp <- 
+  tibble(
+    Barcode = rownames(ps@sam_data),
+    had_16S_data = TRUE
+  ) |> 
+  left_join(swabs, by = join_by(Barcode)) |> 
+  left_join(subjects |> select(USUBJID, ARM))  |> 
+  mutate(
+    Randomized = ifelse(!is.na(ARM), "Randomized", "Non-randomized") |> fct_infreq(), 
+    Arm = ARM |> str_replace_na("-") |> fct_infreq()
+    )
+
+tmp |> 
+  group_by(Randomized) |> 
+  dplyr::count(Arm, name = "n samples with 16S data") |> 
+  gt::gt(
+    "Number of samples with 16S rRNA data per arm",
+    row_group_as_column = TRUE
+  ) |> 
+  gt::summary_rows(
+    columns = "n samples with 16S data", 
+    fns = list(Total = ~ sum(.))
+  ) 
+
+```
+
+```{r}
+
+tmp |> 
+  group_by(Randomized) |> 
+  dplyr::count(Arm, USUBJID, AVISITN) |> 
+  dplyr::count(Arm, name = "n study visits with 16S data") |>
+  gt::gt(
+    "Number of unique study visits with 16S rRNA data per arm",
+    row_group_as_column = TRUE
+    ) |> 
+  gt::summary_rows(
+    columns = "n study visits with 16S data", 
+    fns = list(Total = ~ sum(.))
+  )
+
+```
+
+
+Notes:
+
+- There is one visit from a Placebo participant with duplicates both sequenced. We deal with this in the next section.
+
+- There were more unique visits with shipped swabs than visits with 16S rRNA data. Specifically, we do not have 16S rRNA data for the following visits of the following randomized participants:
+
+```{r}
+
+
+swabs |> 
+  left_join(subjects |> select(USUBJID, ARM), by = join_by(USUBJID)) |> 
+  mutate(
+    Randomized = ifelse(!is.na(ARM), "Randomized", "Non-randomized") |> fct_infreq(), 
+    Arm = ARM |> str_replace_na("-")
+  ) |>
+  left_join(visits |> select(USUBJID, AVISITN), by = join_by(USUBJID, AVISITN)) |> 
+  left_join(tmp |> select(Barcode, had_16S_data), by = join_by(Barcode)) |> 
+  mutate(had_16S_data = had_16S_data |> replace_na(FALSE)) |> 
+  group_by(USUBJID, Arm, AVISITN) |> 
+  summarise(
+    n_swabs = Barcode |> unique() |> length(),
+    has_any_16S_data = any(had_16S_data),
+    .groups = "drop"
+  ) |> 
+  left_join(
+    colData |> select(USUBJID, AVISITN, VISIT_TYPE, LOAD) |> distinct(),
+    by = join_by(USUBJID, AVISITN)
+  ) |> 
+  filter(!has_any_16S_data) |> 
+  select(-has_any_16S_data) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) |> 
+  select(USUBJID, Arm, AVISITN, Visit, VISIT_TYPE, n_swabs, LOAD) |>
+  gt::gt(
+    caption = "Study visit for which swabs were received but no 16S rRNA data was provided in the phyloseq object"
+  ) |> 
+  gt::cols_label(
+    USUBJID = "Participant ID",
+    n_swabs = "Number of swabs",
+    AVISITN = "Visit nb",
+    VISIT_TYPE = "Visit type",
+    Visit = "Visit label",
+    LOAD = "Total bacterial load (qPCR)"
+  )
+
+```
+
+
+```{r}
+
+swabs |> 
+  left_join(subjects |> select(USUBJID, ARM), by = join_by(USUBJID)) |> 
+  mutate(
+    Randomized = ifelse(!is.na(ARM), "Randomized", "Non-randomized") |> fct_infreq(), 
+    Arm = ARM |> str_replace_na("-")
+  ) |>
+  left_join(visits |> select(USUBJID, AVISITN), by = join_by(USUBJID, AVISITN)) |> 
+  left_join(tmp |> select(Barcode, had_16S_data), by = join_by(Barcode)) |> 
+  mutate(had_16S_data = had_16S_data |> replace_na(FALSE)) |> 
+  group_by(USUBJID, Arm, AVISITN) |> 
+  mutate(
+    n_swabs = Barcode |> unique() |> length(),
+    visit_has_any_16S_data = any(had_16S_data)
+  ) |> 
+  ungroup() |> 
+  filter(!visit_has_any_16S_data) |> 
+  select(Barcode, USUBJID, AVISITN, Arm) |> 
+  gt(caption = "Barcodes of the swabs that were shipped for the visits that were not reported in the phyloseq object.")
+
+
+```
+
+
+
+
+```{r}
+rm(tmp)
+```
+
+
+##### Removing duplicates
+
+We remove sample barcoded `202305517` because it is a duplicate for the same visit (sample barcoded `202305516`) and the latter has more total reads and their values correlate relatively well as shown below.
+
+```{r}
+#| fig-width: 3.5
+#| fig-height: 3
+
+ps@otu_table[c("202305516", "202305517"), ] %>% rowSums() |> 
+  tibble::enframe(name = "Barcode", value = "Total reads") |> 
+  knitr::kable(caption = "Total reads for samples 202305516 and 202305517, which are duplicates for the same participant x visit.")
+
+ps@otu_table[c("202305516", "202305517"), ] %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  as_tibble() %>% 
+  ggplot(. , aes(x = `202305516`, y = `202305517`)) +
+  geom_abline(slope = 1, intercept = 0) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  coord_fixed() +
+  xlab("reads for 202305516") + ylab("reads for 202305517")
+
+ps <- phyloseq::subset_samples(ps, sample_names(ps) != "202305517") 
+
+```
+
+
+```{r}
+
+SE_ASV_16S <- create_SE_from_phyloseq(phyloseq_object = ps)
+
+```
+
+
+
+```{r}
+#| eval: false
+
+sequenced_swabs_per_visit <- 
+  full_join(
+    colData,
+    tibble(
+      Barcode = 
+        SummarizedExperiment::assay(SE_ASV_16S) %>% 
+        colnames(), 
+      sequenced = TRUE
+    ), 
+    by = "Barcode"
+  ) %>% 
+  group_by(USUBJID, AVISITN) %>% 
+  summarize(n_swabs_sequenced = sum(sequenced, na.rm = TRUE), .groups = "drop") 
+
+sequenced_swabs_per_visit %>% 
+  mutate(is_na_visit = is.na(AVISITN)) %>% 
+  group_by(is_na_visit, n_swabs_sequenced) %>% 
+  summarize(n = n(), .groups = "drop")
+
+```
+
+
+
+
+##### Filtering out samples with low total read counts
+
+The distribution of total read counts per sample is shown below.
+
+```{r}
+
+ASV_counts <- SummarizedExperiment::assay(SE_ASV_16S)
+total_counts <- colSums(ASV_counts)
+total_counts <- 
+  tibble(
+    Barcode = names(total_counts), 
+    `Total counts per sample` = total_counts
+  ) %>% 
+  left_join(
+    colData %>% 
+      select(Barcode, USUBJID, AVISITN, AVISIT, LOAD) %>% 
+      mutate(AVISITN = AVISITN %>% factor()), 
+    by = join_by(Barcode)
+    )
+
+ggplot(total_counts %>% filter(!is.na(AVISIT)), 
+       aes(x = `Total counts per sample`, fill = AVISIT)) +
+  geom_histogram(bins = 50) +
+  scale_x_log10() +
+  facet_grid(AVISIT ~ . ) +
+  ylab("Nb of samples") +
+  guides(fill = "none") +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0))
+
+```
+
+We observe that samples from Visit 1 (*i.e.,* immediately post-MTZ) are those with the smallest total read count on average. 
+
+This matches the observations that the total bacterial load (as measured by qPCR) is also the smallest at that visit.
+
+However, and as expected, there is only a weak a correlation between total bacterial load (qPCR) and total read counts (16S): 
+
+```{r}
+
+total_counts %>% 
+  filter(
+    !is.na(AVISIT),
+    `Total counts per sample` > 1000
+  ) %>% 
+ggplot(., aes(x = LOAD+1, y = `Total counts per sample`)) +
+  geom_point(aes(col = AVISIT), size = 0.5) +
+  geom_smooth(method = "lm", col = "black") +
+  scale_color_discrete("Visit") +
+  scale_x_log10() +
+  scale_y_log10()
+
+```
+
+
+```{r}
+
+n_with_less_than_10000 <- sum(total_counts$`Total counts per sample` < 10000)
+n_with_less_than_1000 <- sum(total_counts$`Total counts per sample` < 1000)
+
+```
+
+
+In total, there are `r n_with_less_than_10000` samples with less than 10,000 total reads and `r n_with_less_than_1000` samples with less than 1000 total reads (filtered out in the plot above). We filter out these <1000 reads samples  for the downstream analyses.
+
+For information, the samples with less than 10,000 reads are:
+
+```{r}
+
+total_counts |> 
+  filter(`Total counts per sample` < 10000) |> 
+  arrange(`Total counts per sample`) |> 
+  knitr::kable()
+
+```
+
+And the counts for the samples with less than 1000 total reads are:
+
+```{r}
+
+# what are the species in these samples with very low reads
+tmp <- ASV_counts[, (total_counts$`Total counts per sample` <= 1000)]
+tmp <- tmp[rowSums(tmp) > 0,]
+tmp |> knitr::kable()
+
+```
+
+
+We create an additional ASV assay in which samples with less than 1000 counts are filtered out.
+
+```{r}
+
+low_count_samples <- 
+  total_counts$Barcode[total_counts$`Total counts per sample` <= 1000]
+ps_included <- phyloseq::subset_samples(ps, !(sample_names(ps) %in% low_count_samples))
+SE_ASV_16S_included <- create_SE_from_phyloseq(phyloseq_object = ps_included)
+
+```
+
+
+After removal of the duplicates and of the low counts samples, we have `r ncol(SE_ASV_16S_included)` samples with 16S rRNA data.
+
+
+```{r}
+
+tmp <- 
+  tibble(
+    Barcode = colnames(SE_ASV_16S_included),
+    had_16S_data = TRUE
+  ) |> 
+  left_join(swabs, by = join_by(Barcode)) |> 
+  left_join(subjects |> select(USUBJID, ARM))  |> 
+  mutate(Arm = ARM |> str_replace_na("-") |> fct_infreq())
+
+tmp |> 
+  dplyr::count(Arm, name = "n samples with 16S data") |> 
+  gt::gt("Number of samples with 16S rRNA data per arm after filtering") 
+
+```
+
+```{r}
+
+tmp |> 
+  dplyr::count(Arm, USUBJID, AVISITN) |> 
+  dplyr::count(Arm, name = "n study visits with 16S data") |>
+  gt::gt("Number of unique study visits with 16S rRNA data per arm after filtering")
+
+```
+
+These numbers are not the same.
+
+
+
+
+```{r}
+
+randomized_samples <- tmp$Barcode[!is.na(tmp$ARM)]
+total_reads <- colSums(SummarizedExperiment::assay(SE_ASV_16S_included[,randomized_samples]))
+
+```
+
+The median total reads for included samples is `r median(total_reads)`, IQR = `r quantile(total_reads, p = c(0.25, 0.75)) |> round()`.
+
+
+
+
+
+#### Counts agglomerated at the species level
+
+We do this using the `tax_glom` function from the `phyloseq` package.
+
+```{r}
+
+ps_agg <- phyloseq::tax_glom(ps_included, taxrank = "Species")
+SE_tax_16S <- create_SE_from_phyloseq(phyloseq_object = ps_agg)
+
+n_taxa <- ps_agg@otu_table |> ncol()
+
+```
+
+There are `r n_taxa` unique taxa in the agglomerated dataset.
+
+
+### Luminex data
+
+
+
+```{r}
+
+SE_luminex <- 
+  readRDS(
+    str_c(data_dir(), "01_preprocessed/Luminex/luminex_summarised_experiment.RDS")
+  )
+
+n_cytokines <- SummarizedExperiment::assay(SE_luminex) |> nrow()
+n_samples <- SummarizedExperiment::assay(SE_luminex) |> ncol()
+
+```
+
+There are `r n_cytokines` cytokines measured by the Luminex assay for `r n_samples` samples.
+
+Note that 20 cytokines were measured in the Luminex assay, but for two of them (IL-12 p70 and IL-5), no sample had a value above the limit of detection, so they were removed from the dataset.
+
+
+As above, we check that all samples for which we have cytokine data were listed in the shipped swab table.
+
+```{r}
+
+all(rownames(SE_luminex@colData) %in% swabs$Barcode)# should be TRUE
+
+```
+
+And we remove the data for the duplicate sample.
+
+```{r}
+
+SE_luminex <- SE_luminex[, colnames(SE_luminex) != "202305517"]
+
+```
+
+
+
+### CTV-05 proportions from metagenomic assay
+
+
+```{r}
+
+strainfacts_original <- 
+  readRDS(
+    str_c(data_dir(), "01_preprocessed/MG_strainfacts/lactinv_phase2b_ctv05_abundances_20240626.RDS")
+  )
+strainfacts <- strainfacts_original
+
+```
+
+There are some duplicated rows in the data:
+
+```{r}
+
+strainfacts |> duplicated() |> sum()
+
+```
+
+
+For example rows 4 and 5 below
+
+```{r}
+
+strainfacts |> arrange(Sample) |> print(n = 10) 
+
+```
+
+
+to get rid of these duplicated raws, we aggregate (sum relative abundances) by Sample and taxon.
+
+```{r}
+
+strainfacts <- 
+  strainfacts |> 
+  group_by(Sample, USUBJID, arm, visit_name, visit_type, taxon) |> 
+  summarize(Abundance = sum(Abundance), .groups = "drop") 
+
+```
+
+
+```{r}
+
+strainfacts <- 
+  strainfacts |> 
+  mutate(
+    taxon_group = 
+      case_when(
+        taxon |> str_detect("Strain") ~ "non-CTV-05 L. crispatus",
+        taxon == "undetermined" ~ "Undetermined L. crispatus",
+        TRUE ~ taxon
+      ) |> 
+      factor(levels = c("CTV-05", "non-CTV-05 L. crispatus", "Undetermined L. crispatus", "Non L. crispatus"))
+    ) |> 
+  arrange(taxon_group, taxon) |> 
+  mutate(taxon = taxon |> fct_inorder())
+
+```
+
+
+Quick tabulation and visualization of data:
+
+```{r}
+
+strainfacts |>
+  group_by(taxon_group) |> 
+  summarize(n_strains = taxon |> unique() |> length()) |> 
+  gt()
+
+```
+
+
+```{r}
+
+strainfacts |> 
+  ggplot(aes(x = visit_name, y = Abundance, col = taxon_group)) +
+  geom_boxplot() +
+  facet_grid(arm ~ .) +
+  scale_color_manual(values = c("orangered", "orange", "gray30", "gray"))
+
+```
+
+
+
+```{r}
+
+strainfacts <-
+  strainfacts |> 
+  mutate(Barcode = Sample) |> 
+  arrange(Barcode, taxon)
+
+```
+
+
+We also check that the total proportion of *crispatus* estimated from 16S RNA sequencing matches those from metagenomics (it should since those from metagenomic have been estimated from 16S RNA gene seq data).
+
+```{r}
+
+props_Lcrisp_16S <- 
+  SE_tax_16S |> 
+  SummarizedExperiment::assay() |> 
+  as.data.frame() |> 
+  rownames_to_column("taxa") |> 
+  as_tibble() |>
+  pivot_longer(-taxa, names_to = "Barcode", values_to = "counts") |>
+  group_by(Barcode) |> mutate(tot_counts = sum(counts)) |> ungroup() |> 
+  mutate(prop_16S = counts / tot_counts) |>
+  filter(str_detect(taxa, "Lactobacillus crispatus")) 
+  
+crispatus <- 
+  strainfacts |> 
+  filter(taxon != "Non L. crispatus") |> 
+  group_by(Barcode) |>
+  summarize(prop_MG = sum(Abundance), .groups = "drop") |> 
+  left_join(props_Lcrisp_16S, by = join_by(Barcode))
+
+crispatus |> 
+  ggplot(aes(x = prop_MG, y = prop_16S)) +
+  geom_point() +
+  coord_fixed()
+
+```
+
+Proportions match, so we proceed.
+
+
+We create two SummarizedExperiment objects:
+
+1. One with all Strains
+
+2. One with all non-CTV-05 strains aggregated into a single category.
+
+```{r}
+
+strainfacts_wide <- 
+  strainfacts |> 
+  pivot_wider(id_cols = Barcode, names_from = taxon, values_from = Abundance) |> 
+  as.data.frame() |> 
+  column_to_rownames(var = "Barcode") 
+
+SE_strainfacts <- SummarizedExperiment::SummarizedExperiment(
+  assays = list(prop = as.matrix(strainfacts_wide |> t()))
+)
+
+```
+
+```{r}
+
+ctv05_wide <- 
+  strainfacts |> 
+  group_by(Barcode, taxon_group) |> 
+  summarize(Abundance = sum(Abundance), .groups = "drop") |>
+  arrange(Barcode) |> 
+  pivot_wider(id_cols = Barcode, names_from = taxon_group, values_from = Abundance) |>
+  as.data.frame() |>
+  column_to_rownames(var = "Barcode")
+
+SE_CTV05 <- SummarizedExperiment::SummarizedExperiment(
+  assays = list(prop = as.matrix(ctv05_wide |> t()))
+)
+
+
+```
+
+
+
+
+## Creation of the MAE object
+
+### Creating a dummy "swab" assay to keep all randomized participants in the MAE object
+
+
+
+```{r}
+
+swab_SE <- 
+  SummarizedExperiment::SummarizedExperiment(
+    assays = list(
+      swabs = 
+        colData |> 
+        as_tibble() |> 
+        filter(!is.na(ARM)) |> 
+        select(Barcode, USUBJID, AVISITN) |> 
+        full_join(
+          expand_grid(
+            USUBJID = subjects$USUBJID, 
+            AVISITN = visits$AVISITN[visits$PIPV] |> unique()
+          ) |> 
+            mutate(planned_swab = TRUE),
+          by = join_by(USUBJID, AVISITN)
+        ) |> 
+        mutate(
+          planned_swab = planned_swab |> replace_na(FALSE),
+          shipped_swab = !is.na(Barcode),
+          Barcode = ifelse(is.na(Barcode), str_c(USUBJID, "_", AVISITN), Barcode)
+        ) |> 
+        select(Barcode, planned_swab, shipped_swab) |>
+        as.data.frame() |> 
+        column_to_rownames("Barcode") |> 
+        as.matrix() |> 
+        t()
+    )
+  )
+
+```
+
+
+### Creating the MAE object
+
+
+```{r}
+
+assay_list <- 
+  list(
+    swabs = swab_SE,
+    ASV_16S_all = SE_ASV_16S, 
+    ASV_16S = SE_ASV_16S_included, 
+    tax_16S = SE_tax_16S, 
+    cytokine = SE_luminex,
+    MG_all_Lc_strains = SE_strainfacts,
+    MG_CTV05 = SE_CTV05
+    )
+
+mae <- 
+  MultiAssayExperiment::MultiAssayExperiment(
+    experiments = MultiAssayExperiment::ExperimentList(assay_list),
+    colData = colData
+  )
+
+```
+```{r}
+#| eval: false
+# check
+mae@colData |> as_tibble() |> select(USUBJID, ARM) |> distinct() |> dplyr::count(ARM)
+# for the randomized participants, should be the same as
+subjects |> select(USUBJID, ARM) |> distinct() |> dplyr::count(ARM)
+```
+
+
+
+## Visualization of available assays per swabs and visits
+
+```{r}
+
+assay_list <- 
+  tibble(assay = c("ASV_16S", "cytokine", "MG_all_Lc_strains"),
+         assay_label = c("16S rRNA gene sequencing", "Luminex", "MG (strainfacts)"))
+
+mae_sample_map <- 
+  mae@sampleMap |> as_tibble() |> filter(assay %in% assay_list$assay) |> 
+  rename(Barcode = primary) |>
+  select(Barcode, assay) |> 
+  arrange(Barcode) |> 
+  left_join(assay_list, by = join_by(assay))
+
+all_shipped_swabs <- 
+  colData |> 
+  as_tibble() |> 
+  select(Barcode, USUBJID, ARM, AVISITN, PIPV, DAY) |>
+  left_join(mae_sample_map, by = join_by(Barcode)) |> 
+  group_by(Barcode, USUBJID, ARM, AVISITN, PIPV, DAY) |>
+  summarize(
+    n_assays = sum(!is.na(assay)), 
+    assays = str_c(assay_label |> sort() |> unique(), collapse = ", "),
+    .groups = "drop"
+    ) |> 
+  mutate(
+    Assays = case_when(
+      n_assays == max(n_assays) ~ "all",
+      n_assays == 2 ~ assays,
+      n_assays == 1 ~ str_c(assays, " only"),
+      n_assays == 0 ~ "none",
+      TRUE ~ "ERROR"
+    )
+  )
+
+```
+
+
+
+```{r}
+
+visits_with_shipped_swabs <- 
+  all_shipped_swabs |> 
+  group_by(USUBJID, ARM, AVISITN, PIPV, DAY) |> 
+  summarize(
+    n_shipped_swabs = n(),
+    assays = str_c(Assays |> unique() |> sort(), collapse = " | "),
+    .groups = "drop"
+  ) |>
+  mutate(
+    Assays = assays |> str_remove(" \\| none")
+  )
+
+```
+
+
+
+```{r}
+
+summary_swabs <- 
+  all_shipped_swabs |> 
+  count(Assays, name = "n swabs")
+
+summary_visits <- 
+  visits_with_shipped_swabs |> 
+  count(Assays, name = "n visits")
+
+summary_PIPV_visits <- 
+  visits_with_shipped_swabs |> 
+  filter(PIPV) |> 
+  count(Assays, name = "n PIP visits")
+
+
+summary_swabs |> 
+  left_join(summary_visits, by = join_by(Assays)) |> 
+  left_join(summary_PIPV_visits, by = join_by(Assays)) |> 
+  mutate(across(where(is.numeric), ~ replace_na(.x, 0))) |>
+  arrange(`n visits`) |> 
+  adorn_totals("row") |> 
+  rename(`Available assays` = Assays) |>
+  knitr::kable(caption = "Number of swabs and visits per available assays. Visits are visits where at least one swab was shipped. PIP visit = planned in-person visit")
+
+```
+
+Remember that some swabs from non-randomized participants were shipped:
+
+```{r}
+
+all_shipped_swabs |> 
+  filter(is.na(ARM)) |>
+  count(Assays, name = "n swabs from non-randomized participants") |> 
+  knitr::kable()
+
+```
+
+
+
+```{r}
+#| fig-height: 8
+
+visits_with_shipped_swabs |> 
+  filter(!is.na(ARM), !is.na(DAY)) |>
+  mutate(Assays = Assays |> factor(levels = summary_visits$Assays)) |> 
+  ggplot(aes(x = DAY, y = USUBJID, col = Assays)) +
+  geom_point(size = 1) +
+  scale_y_discrete(breaks = NULL) +
+  facet_grid(ARM ~ ., scales = "free", space = "free") +
+  scale_color_manual(
+    "Available assays", 
+    values = 
+      c(
+        "all" = "#31B2F2", 
+        "16S rRNA gene sequencing only" = "#F18622", 
+        "Luminex only" = "#F11EB5",
+        "16S rRNA gene sequencing, Luminex" = "seagreen2",
+        "16S rRNA gene sequencing, MG (strainfacts)" = "darkorange",
+        "Luminex, MG (strainfacts)" = "purple"
+        )
+    )
+
+```
+
+
+
+```{r}
+
+barcodes <- mae$Barcode[(mae$PIPV) & !is.na(mae$ARM)]
+assay_list <- c("ASV_16S", "cytokine")
+
+get_n_samples_statistics(mae, assay_list = assay_list, barcodes = barcodes) |> 
+  knitr::kable(caption = "Number of participant with data for both assays (16S and Luminex) per combination of visits")
+
+```
+
+
+
+## Save MAE
+
+
+```{r}
+
+output_dir <- str_c(data_dir(), "02_mae/")
+save_mae(mae, output_dir)
+
+# (If dropbox mounting was done manually, remember to unmount it.)
+
+```
+
+
+
+## Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>
+
+
+
+

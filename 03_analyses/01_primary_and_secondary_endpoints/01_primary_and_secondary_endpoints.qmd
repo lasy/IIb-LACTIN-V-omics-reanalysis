@@ -1,0 +1,1571 @@
+---
+title: "Primary and secondary outcomes & microbiota trajectories" 
+author: Laura Symul
+format: 
+   html:
+     page-layout: full
+     code-fold: true
+     toc: true
+     toc-location: left
+     toc-depth: 5
+     embed-resources: true
+execute:
+  cache: true # refresh true false
+knitr:
+  opts_chunk:
+    out.width: "100%"
+editor: source
+---
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(gt)
+library(ggrepel)
+library(ggalluvial)
+library(MultiAssayExperiment)
+library(SummarizedExperiment)
+library(phyloseq)
+
+
+```
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+theme_set(theme_publication())
+
+```
+
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(dir = str_c(data_dir(), "03_augmented_mae/")) 
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame() |> as_tibble()
+
+```
+
+## Primary and secondary outcomes
+
+### Data
+
+
+```{r}
+
+outcome_data <- 
+  get_assay_long_format(mae, "mb_categories_wide") |> 
+  filter(AVISITN %in% c(4, 7)) |> 
+  mutate(Week = AVISITN |> get_visit_labels(), Arm = ARM) |> 
+  select(Barcode, feature, value, USUBJID, Week, Arm)
+
+outcome_counts <- 
+  bind_rows(
+    outcome_data |> 
+      filter(feature == "≥ 50% L. crispatus") |> 
+      mutate(
+        Taxon = "L. crispatus",
+        `Microbiota Endpoint` = ifelse(value == 0, "< 50% L. c.", "≥ 50% L. c."),
+      ) |> 
+      dplyr::count(Taxon, Week, `Microbiota Endpoint`, Arm),
+    outcome_data |> 
+      filter(str_detect(feature, "≥")) |> 
+      group_by(Barcode, USUBJID, Week, Arm) |> 
+      summarize(value = sum(value), .groups = "drop") |> 
+      mutate(
+        Taxon = "Lactobacillus",
+        `Microbiota Endpoint` = ifelse(value == 0, "< 50% Lacto.", "≥ 50% Lacto..")
+      ) |> 
+      dplyr::count(Taxon, Week, `Microbiota Endpoint`, Arm)
+  ) |> 
+  mutate(`Microbiota Endpoint` = `Microbiota Endpoint` |> fct_inorder() |> fct_rev()) |> 
+  arrange(Taxon, Week, `Microbiota Endpoint`, Arm) |> 
+  group_by(Taxon, Week, Arm) |> 
+  mutate(perc = 100 * n/sum(n)) |> 
+  ungroup() |> 
+  mutate(res = str_c(n, " (", perc |> round(), "%)"))
+
+table_1_data <-  
+  outcome_counts |> 
+  select(-n, -perc) |> 
+  pivot_wider(names_from = Arm, values_from = res)
+
+# table_1_data
+
+```
+
+
+
+```{r}
+#| eval: false
+# check with relative abundances
+
+mae[["tax_16S_p"]] |> assay() |> t() |> as.data.frame() |> 
+  rownames_to_column("Barcode") |> select(Barcode, `Lactobacillus crispatus`) |> 
+  as_tibble() |> 
+  left_join(
+    mae@colData |> as_tibble() |> select(Barcode, USUBJID, ARM, AVISITN, PIPV)
+  ) |> 
+  filter(AVISITN == 4) |> 
+  mutate(
+    outcome = ifelse(`Lactobacillus crispatus` >= 0.5, "≥ 50% L. crispatus", "< 50% L. crispatus") 
+  ) |> 
+  dplyr::count(
+    ARM, outcome
+  )
+
+# same as above
+  
+```
+
+
+```{r}
+#| eval: false
+# check with taxa counts
+
+tmp <- mae[["tax_16S"]] |> assay()
+j <- str_detect(rownames(tmp), "crispatus")
+counts_crisp <- tmp[j,] |> colSums()
+total_counts <- tmp |> colSums()
+
+tibble(
+  Barcode = colnames(tmp),
+  `Lactobacillus crispatus` = counts_crisp / total_counts
+) |> 
+  left_join(
+    mae@colData |> as_tibble() |> select(Barcode, USUBJID, ARM, AVISITN, PIPV)
+  ) |> 
+  filter(AVISITN == 4) |> 
+  mutate(
+    outcome = ifelse(`Lactobacillus crispatus` >= 0.5, "≥ 50% L. crispatus", "< 50% L. crispatus") 
+  ) |> 
+  dplyr::count(
+    ARM, outcome
+  )
+
+# same as above
+  
+```
+
+```{r}
+#| eval: false
+# check with ASV counts
+
+tmp <- mae[["ASV_16S"]] |> assay()
+j <- str_detect(rownames(tmp), "crispatus")
+counts_crisp <- tmp[j,] |> colSums()
+total_counts <- tmp |> colSums()
+
+tibble(
+  Barcode = colnames(tmp),
+  `Lactobacillus crispatus` = counts_crisp / total_counts
+) |> 
+  left_join(
+    mae@colData |> as_tibble() |> select(Barcode, USUBJID, ARM, AVISITN, PIPV)
+  ) |> 
+  filter(AVISITN == 4) |> 
+  mutate(
+    outcome = ifelse(`Lactobacillus crispatus` >= 0.5, "≥ 50% L. crispatus", "< 50% L. crispatus") 
+  ) |> 
+  dplyr::count(
+    ARM, outcome
+  )
+
+# different than above -> difference likely comes from the aggregation at the taxonomic level (phyloseq::tax_glom)
+
+  
+```
+
+
+
+### Benefit ratios, confidence intervals, and statistical tests
+
+```{r}
+
+table_1_res <- 
+  map(
+    .x = 1:4,
+    .f = function(i, outcome_counts){
+      var <- outcome_counts |> select(Taxon, Week) |> distinct() 
+      sel_taxon <- var$Taxon[i]
+      sel_week <- var$Week[i]
+      res <- 
+        outcome_counts |> 
+        filter(Taxon == sel_taxon, Week == sel_week) |> 
+        select(Arm,  `Microbiota Endpoint`, n) |> 
+        arrange(`Microbiota Endpoint` |> desc()) |> 
+        arrange(Arm |> desc()) |> 
+        pivot_wider(values_from = n, names_from = `Microbiota Endpoint`) |> 
+        as.data.frame() |> 
+        column_to_rownames("Arm") |> 
+        as.matrix() |> 
+        epitools::riskratio() 
+      
+      tibble(
+        Taxon = sel_taxon,
+        Week = sel_week,
+        `Benefit Ratio (95% CI)` = 
+          str_c(
+            res$measure[2,1] |> round(2),
+            "\n(", res$measure[2,2] |> round(2), " - ",
+            res$measure[2,3] |> round(2), ")"
+          ),
+        pval = ifelse(i == 1, res$p.value[2,1], NA)
+      )
+    },
+    outcome_counts = outcome_counts
+  ) |> 
+  bind_rows()
+
+# table_1_res
+
+```
+
+
+### Table 1
+
+```{r}
+
+table_1 <- 
+  table_1_data |> left_join(table_1_res, by = join_by(Taxon, Week))
+
+```
+
+
+```{r}
+
+table_1 |> 
+  group_by(Taxon) |> 
+  gt(row_group_as_column = TRUE) |> 
+  sub_missing(columns = everything(), missing_text = "")
+
+```
+
+
+## Relationship between BV and endpoints.
+
+
+```{r}
+
+categories_all <- get_assay_long_format(mae, "mb_categories", values_name = "microbiota_category")
+
+categories <- categories_all |> filter(!is.na(BV), BV != "Missing", !is.na(microbiota_category), AVISITN >= 2)
+
+```
+
+```{r}
+
+table_long <- 
+  expand_grid(
+    microbiota_category = unique(categories$microbiota_category), 
+    BV = unique(categories$BV)
+  )  |> 
+  left_join(
+    categories |> dplyr::count(microbiota_category, BV),
+    by = join_by(microbiota_category, BV)
+  ) |> 
+  mutate(n = n |> replace_na(0)) |> 
+  group_by(microbiota_category) |>
+  mutate(total = sum(n), perc = (100 * n / total) |> round(2)) |>
+  ungroup() 
+
+table_long |> gt()
+
+```
+
+```{r}
+
+table_wide <- 
+  table_long |> 
+  mutate(
+    BV = ifelse(BV == "Yes", "rBV", "no rBV"),
+    res = str_c(n, " (", perc |> round(), " %)")
+  ) |> 
+  pivot_wider(id_cols = microbiota_category, names_from = BV, values_from = res) |> 
+  dplyr::rename(
+    `Microbiota category (16S rRNA based)` = microbiota_category
+  )
+
+table_wide |> gt()
+
+```
+
+## Microbiota composition at the week 12 and week 24 visits
+
+
+
+```{r}
+
+microbiota <- 
+  get_assay_long_format(
+    mae, "tax_16S_p", 
+    values_name = "prop", feature_name = "Taxon"
+  )
+
+```
+
+
+### Week 12
+
+```{r}
+#| fig-width: 15
+#| fig-height: 7
+
+g_12_LV <- 
+  plot_taxa_composition(mae, "tax_16S_p", visit_nb = 4, arm = "LACTIN-V", n_species = 15) +
+  ylab("Week 12\nRelative abundance")
+
+g_12_P <- 
+  plot_taxa_composition(mae, "tax_16S_p", visit_nb = 4, arm = "Placebo", n_species = 15) +
+  ylab("Week 12\nRelative abundance")
+
+g_12_LV + g_12_P +
+  plot_layout(guides = "collect", ncol = 1) &
+  theme(legend.position = "right", strip.text.y = element_text(angle = -90, hjust = 0.5)) 
+
+```
+
+
+
+### Week 24
+
+```{r}
+#| fig-width: 15
+#| fig-height: 7
+
+g_24_LV <- 
+  plot_taxa_composition(mae, "tax_16S_p", visit_nb = 7, arm = "LACTIN-V", n_species = 15)
+
+g_24_P <- 
+  plot_taxa_composition(mae, "tax_16S_p", visit_nb = 7, arm = "Placebo", n_species = 15)
+
+g_24_LV + g_24_P +
+  plot_layout(guides = "collect", ncol = 1) &
+  theme(legend.position = "right") 
+
+```
+
+## Transitions between categories
+
+### Sankey diagram
+
+```{r}
+
+sankey_data <- 
+  get_assay_long_format(mae, "mb_categories_wide") |> 
+  filter(PIPV, value == 1, !is.na(ARM)) |> 
+  select(Barcode, feature, USUBJID, AVISITN, ARM)
+
+sankey_data <- 
+  sankey_data |> 
+  full_join(
+    expand_grid(
+      sankey_data |> 
+        select(USUBJID, ARM) |> 
+        distinct() |> 
+        group_by(ARM) |> 
+        mutate(y = 1/n()) |> 
+        ungroup(),
+      AVISITN = c(0:4, 7)
+    ),
+    by = join_by(USUBJID, AVISITN, ARM)
+  ) 
+
+sankey_data <- 
+  sankey_data |> 
+  mutate(AVISITN_next = ifelse(AVISITN < 4, AVISITN + 1, 7)) |> 
+  left_join(
+    sankey_data |> 
+      select(USUBJID, AVISITN, feature) |> 
+      dplyr::rename(AVISITN_next = AVISITN, feature_next = feature),
+    by = join_by(USUBJID, AVISITN_next)
+  ) |> 
+  mutate(
+    Arm = ifelse(ARM == "LACTIN-V", "Lactin-V", "Placebo"),
+    Visit = AVISITN |> get_visit_labels(),
+    endpoint = 
+      feature |> 
+      str_replace_na("Missing") |> 
+      factor(levels = c(levels(feature) |> rev(), "Missing")),
+    endpoint_flow = 
+      case_when(
+        is.na(feature_next) ~ NA_character_, 
+        TRUE ~ feature
+      ) |> 
+      str_replace_na("") |> 
+      factor(levels = c(levels(feature), ""))
+  )
+
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 4
+
+g_sankey <- 
+  sankey_data |> 
+  ggplot() +
+  aes(x = Visit, y = y, stratum = endpoint |> fct_rev(), 
+      alluvium = USUBJID) +
+  geom_stratum(aes(fill = endpoint), col = NA) +
+  geom_flow(aes(fill = endpoint_flow), curve_type = "cubic") +
+  facet_grid(Arm ~ ., scales = "free_y")  +
+  scale_y_continuous("% of participants", labels = scales::label_percent()) +
+  theme(
+    strip.text.y = element_text(angle = -90, hjust = 0.5)
+  )
+
+g_sankey_v1 <- 
+  g_sankey +
+  scale_fill_manual(
+    "Category", 
+    labels = c(sankey_data$endpoint |> levels(),"") |> str_replace(", < 50% L. crispatus", ", < 50% L.c."),
+    values = c(
+      get_topic_colors(c("I","III", "IV") |> rev()), "gray80", "transparent"
+    ), 
+    na.value = "transparent",
+    guide = guide_legend(direction = "vertical")
+  ) +
+  theme(legend.position = "right")
+
+g_sankey_v2 <- 
+  g_sankey +
+  scale_fill_manual(
+    "Category", 
+    labels = c(sankey_data$endpoint |> levels(),"") |> str_replace(", < 50% L. crispatus", ", < 50% L.c."),
+    values = c(
+      get_topic_colors(c("I","III", "IV") |> rev()), "gray80", "transparent"
+    ), 
+    na.value = "transparent",
+    guide = guide_legend(nrow = 2, direction = "horizontal")
+  ) +
+  theme(legend.position = "top")
+  
+
+g_sankey_v2
+
+```
+
+
+```{r}
+
+tmp <- 
+  sankey_data |> 
+  dplyr::count(Visit, Arm, endpoint) |> 
+  group_by(Visit, Arm) |> 
+  mutate(perc = 100 * n / sum(n)) |> 
+  ungroup() |> 
+  mutate(endpoint = endpoint |> fct_rev() |> fct_relevel("Missing", after = Inf) |> fct_expand("Total"))
+
+tmp  |> 
+  bind_rows(
+    tmp |> 
+      group_by(Arm, Visit) |> 
+      summarize(n = sum(n), perc = sum(perc), .groups = "drop") |> 
+      mutate(endpoint = "Total" |> factor(levels = tmp$endpoint |> levels()))
+  ) |> 
+  arrange(Visit, Arm, endpoint) |> 
+  mutate(value = str_c(n, " (", perc |> round(), "%)")) |> 
+  select(-n, -perc) |> 
+  pivot_wider(names_from = Visit, values_from = value, values_fill = "0") |> 
+  arrange(Arm, endpoint) |> 
+  dplyr::rename(Outcome = endpoint) |> 
+  group_by(Arm) |> 
+  gt(
+    row_group_as_column = TRUE,
+    caption = "Number (and %) of participant per outcome at each visit in both arms"
+  )
+
+```
+
+
+```{r}
+
+tmp <- 
+  sankey_data |> 
+  filter(endpoint != "Missing") |> 
+  dplyr::count(Visit, Arm, endpoint) |> 
+  group_by(Visit, Arm) |> 
+  mutate(perc = 100 * n / sum(n)) |> 
+  ungroup() |> 
+  mutate(endpoint = endpoint |> fct_rev() |> fct_relevel("Missing", after = Inf) |> fct_expand("Total"))
+
+tmp  |> 
+  bind_rows(
+    tmp |> 
+      group_by(Arm, Visit) |> 
+      summarize(n = sum(n), perc = sum(perc), .groups = "drop") |> 
+      mutate(endpoint = "Total" |> factor(levels = tmp$endpoint |> levels()))
+  ) |> 
+  arrange(Visit, Arm, endpoint) |> 
+  mutate(value = str_c(n, " (", perc |> round(), "%)")) |> 
+  select(-n, -perc) |> 
+  pivot_wider(names_from = Visit, values_from = value, values_fill = "0") |> 
+  arrange(Arm, endpoint) |> 
+  dplyr::rename(Category = endpoint) |> 
+  group_by(Arm) |> 
+  gt(
+    row_group_as_column = TRUE,
+    caption = "Number (and %) of participant per outcome at each visit in both arms (excluding missing visits)"
+  )
+
+```
+
+
+### String-of-pearls viz
+
+```{r}
+
+string_of_pearl_data <- 
+  sankey_data |> 
+  arrange(USUBJID, AVISITN) |> 
+  select(USUBJID, AVISITN, Arm, feature) |> 
+  dplyr::rename(endpoint = feature)
+
+string_of_pearl_data <- 
+  string_of_pearl_data |> 
+  filter(!is.na(endpoint)) |> 
+  left_join(
+    string_of_pearl_data |> 
+      filter(!is.na(endpoint)) |> 
+      select(USUBJID, AVISITN, endpoint) |> 
+      dplyr::rename(AVISITN_next = AVISITN, endpoint_next = endpoint),
+    by = join_by(USUBJID),
+    relationship = "many-to-many"
+  ) |> 
+  filter(AVISITN_next > AVISITN) |> 
+  group_by(USUBJID, AVISITN) |> 
+  slice_head(n = 1) |> 
+  ungroup() |> 
+  full_join(
+    string_of_pearl_data, 
+    by = join_by(USUBJID, AVISITN, Arm, endpoint)
+  ) |> 
+  arrange(USUBJID, AVISITN)
+
+string_of_pearl_data <- 
+  string_of_pearl_data |> 
+  arrange(AVISITN |> desc()) |> 
+  group_by(USUBJID) |> 
+  mutate(order = str_c(endpoint |> as.numeric() |> replace_na(4), collapse = "")) |> 
+  ungroup() |> 
+  arrange(order |> desc()) |> 
+  mutate(USUBJID = USUBJID |> fct_inorder()) |> 
+  arrange(order, USUBJID, AVISITN)
+
+string_of_pearl_data <- 
+  string_of_pearl_data |> 
+  mutate(
+    Visit = AVISITN |> get_visit_labels(),
+    Visit_next = AVISITN_next |> get_visit_labels(),
+    Visit_next = case_when(is.na(Visit_next) ~ Visit, TRUE ~ Visit_next)
+  )
+
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 6
+
+string_of_pearl_data |> 
+  ggplot(aes(x = Visit, y = USUBJID, col = endpoint)) +
+  geom_segment(aes(yend = USUBJID, xend = Visit_next, col = endpoint)) +
+  geom_point() +
+  facet_grid(Arm ~ ., scales = "free_y", space = "free_y") +
+  scale_color_manual(
+    "Category", 
+    values = c(
+      get_topic_colors(c("I","III", "IV")), "transparent", "transparent"
+    ), 
+    na.value = "transparent",
+    guide = guide_legend(direction = "vertical", position = "right")
+  ) +
+  ylab("Participants") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    axis.text.y = element_blank(),
+    strip.text.y = element_text(angle = -90, hjust = 0.5),
+    legend.position = "right"
+  ) 
+```
+
+## Alpha- and beta-diversity at the different visits
+
+```{r}
+
+tibble(
+  Barcode = mae[["tax_16S_p"]] |> colnames(),
+  alpha = vegan::diversity(mae[["tax_16S_p"]] |> SummarizedExperiment::assay() |> as.matrix() |> t())
+) |> 
+  left_join(
+    mae@colData |> as_tibble(),
+    by = join_by(Barcode)
+  ) |> 
+  filter(PIPV) |> 
+  ggplot() +
+  aes(x = AVISITN |> get_visit_labels(), y = alpha, col = ARM, fill = ARM) +
+  geom_boxplot(alpha = 0.3) +
+  scale_color_manual(values = get_arm_colors()) +
+  scale_fill_manual(values = get_arm_colors()) 
+
+```
+
+```{r}
+
+mb_wide <- get_assay_wide_format(mae, "tax_16S_p")
+BC <- 
+  map(
+    c(0:4, 7),
+    function(.x){
+      
+      tmp <- 
+        mb_wide |> 
+        filter(AVISITN == .x)
+      
+      tmp |> 
+        select(assay) |> 
+        unnest(assay) |> 
+        vegan::vegdist(method = "bray") |> 
+        as.matrix() |> 
+        as.data.frame() |> 
+        set_colnames(tmp$Barcode) |> 
+        mutate(Barcode_1 = tmp$Barcode) |> 
+        pivot_longer(-Barcode_1, names_to = "Barcode_2", values_to = "BC") |>
+        mutate(Barcode_1 = Barcode_1 |> factor(), Barcode_2 = Barcode_2 |> factor()) |>
+        filter(BC > 0, as.numeric(Barcode_1) > as.numeric(Barcode_2)) |> 
+        mutate(AVISITN = .x)
+    }
+  ) |> 
+  bind_rows()
+
+BC |> 
+  ggplot() +
+  aes(x = AVISITN |> get_visit_labels(), y = BC) +
+  geom_boxplot(alpha = 0.3) 
+
+BC |>
+  mutate(visit = get_visit_labels(AVISITN)) |> 
+  group_by(visit) |>
+  summarize(mean_BC = mean(BC) |> round(2)) |> 
+  pivot_wider(names_from = visit, values_from = mean_BC) |> 
+  gt(caption = "Average beta-diversity at each visit. beta-diversity estimated using Bray-Curtis dissimilarities on taxonomic relative abundances")
+
+```
+
+## Total bacterial load (as estimated by qPCR)
+
+```{r}
+
+df_load <- 
+  clin |> 
+  select(USUBJID, ARM, AVISITN, PIPV, LOAD) |> 
+  filter(PIPV, AVISITN > 0) |> 
+  mutate(
+    Visit = 
+      get_visit_labels(AVISITN) |> fct_drop() |> 
+      fct_expand("Pre-MTZ", after = 0),
+    Arm = ARM |> str_replace("ACTIN", "actin")
+  )
+
+g_load <- 
+  ggplot(df_load, aes(x = Visit, y = LOAD + 1, fill = Arm, col = Arm)) +
+  geom_boxplot(alpha = 0.6, outlier.size = 0.5) +
+  ylab("\nTotal load") + scale_y_log10() +
+  scale_x_discrete("Visit", drop = FALSE)
+  
+
+
+g_load_v1 <- 
+  g_load +
+  scale_fill_manual(
+    "Study arm", values = get_arm_colors(), guide = guide_legend(direction = "vertical", position = "right")
+  ) +
+  scale_color_manual(
+    "Study arm", values = get_arm_colors(), guide = guide_legend(direction = "vertical", position = "right")
+  ) 
+
+
+g_load_v2 <- 
+  g_load + 
+  scale_fill_manual(
+    "Study arm", values = get_arm_colors(), guide = guide_legend(direction = "horizontal", position = "top")
+  ) +
+  scale_color_manual(
+    "Study arm", values = get_arm_colors(), guide = guide_legend(direction = "horizontal", position = "top")
+  ) 
+
+```
+
+```{r}
+#| fig-height: 3
+#| fig-width: 5
+g_load_v2
+```
+
+
+## Microbiota trajectories (subcommunities)
+
+### Topic composition
+
+We first display the topic composition.
+
+```{r}
+#| label: fig-topicComp
+#| fig-cap: "Composition of each topic (x-axis, colors) in terms of taxa (y-axis). The size of the dot indicate the proportion of a taxa in a topic. Proportions sum to 1 for each topic (vertically)."
+#| fig-height: 8
+
+plot_topic_betas(mae, "c_topics_16S_8")
+
+```
+
+```{r}
+#| fig-cap: "Composition of non-Lactobacillus topic (y-axis, colors) in terms of taxa (c-axis). The size of the dot indicate the proportion of a taxa in a topic. Proportions sum to 1 for each topic (horizontally)."
+#| fig-width: 10
+#| fig-height: 4
+
+g_topics_comp <- 
+  plot_topic_betas(
+    mae, "c_topics_16S_8", exclude_lacto_topics = TRUE, topic_label = "topic_label",
+    threshold = 1/100, direction = "h"
+  ) +
+  theme(legend.position = "top")
+
+g_topics_comp
+
+```
+
+
+
+```{r}
+#| fig-cap: "Composition of non-Lactobacillus topic (y-axis, colors) in terms of taxa (c-axis). The size of the dot indicate the proportion of a taxa in a topic. Proportions sum to 1 for each topic (horizontally)."
+#| fig-width: 4
+#| fig-height: 8
+#| cache: false
+
+g_topics_comp_v2 <- 
+  plot_topic_betas(
+    mae, "c_topics_16S_8", exclude_lacto_topics = TRUE, 
+    topic_label = "topic_label",
+    threshold = 1/100, direction = "v"
+  ) +
+  theme(
+    legend.position = "top", legend.box.margin = margin(r = 140),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+
+g_topics_comp_v2
+
+```
+
+
+### Trajectories
+
+
+```{r}
+
+tmp <- 
+  get_assay_long_format(
+    mae, "c_topics_16S_8", add_rowData = TRUE,
+    feature_name = "topic", values_name = "prop"
+    ) |>
+  filter(PIPV) |>
+  group_by(USUBJID) |> mutate(n_visits = AVISITN |> unique() |> length()) |> ungroup() |>
+  filter(n_visits > 3) |> 
+  select(Barcode, starts_with("topic") , prop, USUBJID, ARM, AVISITN) |> 
+  mutate(visit = AVISITN |> get_visit_labels()) 
+
+topic_score <- 
+  bind_rows(
+    tibble(topic_subcst_matching_label = "I", topic_score = 3),
+    tibble(topic_subcst_matching_label = "III", topic_score = 2),
+    tibble(topic_subcst_matching_label = "V", topic_score = 0),
+    tibble(topic_subcst_matching_label = "VI", topic_score = 1),    
+    tibble(topic_subcst_matching_label = "IV-A", topic_score = -4),
+    tibble(topic_subcst_matching_label = "IV-B", topic_score = -3),
+    tibble(topic_subcst_matching_label = "IV-O.a", topic_score = -2),
+    tibble(topic_subcst_matching_label = "IV-O.b", topic_score = -1),
+  ) |> 
+  mutate(topic_subcst_matching_label = topic_subcst_matching_label |> factor(levels = levels(tmp$topic_subcst_matching_label)))
+
+visit_score <- 
+  bind_rows(
+    tibble(AVISITN = 0, visit_score = 1),
+    tibble(AVISITN = 1, visit_score = 0),
+    tibble(AVISITN = 2, visit_score = 1),
+    tibble(AVISITN = 3, visit_score = 2),
+    tibble(AVISITN = 4, visit_score = 3),
+    tibble(AVISITN = 7, visit_score = 4),
+  )
+
+tmp <- 
+  tmp |> 
+  left_join(topic_score, by = join_by(topic_subcst_matching_label)) |>  
+  left_join(visit_score, by = join_by(AVISITN)) |> 
+  mutate(score = topic_score * prop * visit_score) |> 
+  group_by(USUBJID) |>  mutate(total_score = sum(score)) |> ungroup() |> 
+  mutate(USUBJID = USUBJID |> factor() |> fct_reorder(total_score)) |> 
+  select(-topic_score) 
+
+tmp <- 
+  tmp |> 
+  mutate(Arm = ARM |> str_replace("ACTIN", "actin"))
+
+```
+
+```{r}
+#| fig-height: 8
+#| fig-width: 7
+
+
+topic_labels <- c(
+  expression(italic("L. crisp.")),
+  expression(italic("L. iners")),
+  expression(italic("L. jensenii")),
+  expression(Other~italic("L.")), 
+  expression(italic("G. s./l.")~"topic"),
+  expression(italic("P. amnii")~"topic"),
+  expression(italic("Ca. L. v.")~"(BVAB1) topic"),
+  expression(italic("P. bivia")~"topic")
+)
+  
+
+g_subcommunities_traj <- 
+  tmp |> 
+  ggplot() +
+  aes(x = prop, y = USUBJID) +
+  geom_col(aes(fill = topic_label)) + 
+  scale_fill_manual(
+    "Taxon\nor topic", 
+    values = get_topic_colors(tmp$topic_label |> levels()),
+    breaks = tmp$topic_label |> levels(), labels = topic_labels
+  ) +
+  scale_y_discrete("Participants\n(ordered by microbiota composition)", breaks = NULL) +
+  facet_grid(Arm ~ visit, scales = "free", space = "free") +
+  # guides(fill = "none") +
+  scale_x_continuous("Relative abundance", breaks = seq(0, 1, l = 3), labels = c(0, 0.5, 1)) +
+  theme(
+    strip.text.y = element_text(angle = -90, hjust = 0.5),
+    legend.position = "top"
+  )
+
+g_subcommunities_traj
+
+
+```
+
+### Distribution of topic proportions at different time-points
+
+```{r}
+#| fig-width: 13
+#| fig-height: 5
+
+g_violin <- 
+  tmp |> 
+  ggplot() +
+  aes(x = topic_label, y = prop,  fill = topic_label) +
+  facet_grid(Arm ~ visit) +
+  geom_violin(col = NA, scale = "width", alpha = 0.5, draw_quantiles = 0.5) +
+  ggbeeswarm::geom_quasirandom(aes(col = topic_label), size = 0.5) +
+  scale_fill_manual(
+    "Taxon\nor topic", 
+    values = get_topic_colors(tmp$topic_label |> levels()),
+    breaks = tmp$topic_label |> levels(), labels = topic_labels
+  ) +
+  scale_color_manual(
+    "Taxon\nor topic", 
+    values = get_topic_colors(tmp$topic_label |> levels()),
+    breaks = tmp$topic_label |> levels(), labels = topic_labels
+  ) +
+  scale_x_discrete("Taxon or topic", breaks = NULL) +
+  scale_y_continuous("Relative abundance", labels = scales::label_percent()) 
+
+
+g_violin
+
+```
+```{r}
+
+ggsave(g_violin, filename = str_c(fig_out_dir(), "S2D.pdf"), width = 13, height = 6, device = cairo_pdf)
+
+```
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 5
+
+g_spaghetti <- 
+  tmp |> 
+  arrange(USUBJID, visit) |> 
+  ggplot() +
+  aes(x = visit, y = prop,  col = topic_label) +
+  facet_grid(Arm ~ topic_label |> str_replace("topic", "\ntopic") |> str_replace("\\(BVAB1\\) \ntopic", "\n\\(BVAB1\\) topic") |> fct_inorder()) +
+  geom_path(aes(group = USUBJID), alpha = 0.3, linewidth = 0.5) +
+  geom_point(alpha = 0.8, size = 0.5) +
+  scale_fill_manual(
+    "Taxon\nor topic", 
+    values = get_topic_colors(tmp$topic_label |> levels()),
+    breaks = tmp$topic_label |> levels(), labels = topic_labels
+  ) +
+  scale_color_manual(
+    "Taxon\nor topic", 
+    values = get_topic_colors(tmp$topic_label |> levels()),
+    breaks = tmp$topic_label |> levels(), labels = topic_labels
+  ) +
+  scale_x_discrete("Visit") +
+  scale_y_continuous("Relative abundance", labels = scales::label_percent()) +
+  guides(col = "none") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5) 
+  ) 
+
+g_spaghetti
+
+```
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 10
+
+g_violin + g_spaghetti +
+  plot_annotation(tag_levels = list(c("F","G"))) +
+  plot_layout(ncol = 1) & 
+  theme(legend.position = "top")
+
+
+
+```
+
+
+
+
+## Longitudinal stability
+
+
+```{r}
+
+BC_between_visits <- 
+  compute_BC_between_successive_visits(mae, assayname = "ASV_16S_filtered_p", v = c(0:4,7))  |> 
+  left_join(clin |> select(USUBJID, ARM) |> distinct(), by = join_by(USUBJID)) 
+
+BC_between_visits <- 
+  BC_between_visits %>% 
+  mutate(
+    v1_label = get_visit_labels(v1),
+    v2_label = get_visit_labels(v2),
+    id = str_c(v1_label, "\nto ", v2_label),
+    id = id |> factor(levels = unique(id)),
+    Arm = ARM |> str_replace("ACTIN", "actin")
+  )
+
+```
+
+### By arms
+
+
+```{r}
+#| label: stability over time
+#| fig-height: 3
+
+g_BC_successive <- 
+  ggplot(BC_between_visits, aes(x = id, y = BC, fill = Arm, col = Arm)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.5) +
+  xlab("") +
+  ylab("Bray-Curtis diss.\nconsecutive v.") +
+  scale_fill_manual("Study arm", values = get_arm_colors()) +
+  scale_color_manual("Study arm", values = get_arm_colors()) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) # , vjust = 0.5
+
+g_BC_successive
+
+```
+
+```{r}
+
+bind_rows(
+  BC_between_visits, 
+  BC_between_visits |> mutate(Arm = "All")
+) |> 
+  arrange(id) |> 
+  mutate(id = id |> str_replace("\n", " ") |> fct_inorder()) |> 
+  group_by(Arm, id) |> 
+  summarize(
+    median_BC = median(BC),
+    q25 = quantile(BC, p = 0.25),
+    q75 = quantile(BC, p = 0.75),
+    .groups = "drop"
+  ) |> 
+  mutate(
+    value = 
+      str_c(
+        median_BC |> format(digits = 2), 
+        " (", q25 |> format(digits = 2), " - ", q75 |> format(digits = 2), ")"
+      )
+  ) |> 
+  select(-median_BC, -q25, -q75) |> 
+  pivot_wider(names_from = Arm, values_from = value) |> 
+  dplyr::rename("Transition" = id) |> 
+  gt(
+    caption = "Median (and IQR) Bray-Curtis dissimilarities between samples at consecutive visits for participants with available data."
+  )
+
+
+```
+
+
+The largest longitudinal shifts in composition occur after MTZ and after the 4 first weeks of intervention (and more so in the LACTIN-V arm). From week 4, dissimilarities are lower, suggesting that most participants have a stable microbiota.
+
+### By arms and microbiota categories
+
+```{r}
+
+BC_between_visits_with_endpoints <- 
+  BC_between_visits |> 
+  left_join(
+    get_assay_long_format(mae, "mb_categories", add_colData = FALSE, values_name = "mb_categories") |> 
+      select(Barcode, mb_categories) |> 
+      mutate(mb_categories = mb_categories |> factor(levels = c("≥ 50% L. crispatus", "≥ 50% Lactobacillus, < 50% L. crispatus", "< 50% Lactobacillus"))) |> 
+      dplyr::rename(Barcode_v1 = Barcode, mb_categories_v1 = mb_categories),
+    by = join_by(Barcode_v1)
+  ) |> 
+  left_join(
+    get_assay_long_format(mae, "mb_categories", add_colData = FALSE, values_name = "mb_categories") |> 
+      select(Barcode, mb_categories) |> 
+      mutate(mb_categories = mb_categories |> factor(levels = c("≥ 50% L. crispatus", "≥ 50% Lactobacillus, < 50% L. crispatus", "< 50% Lactobacillus"))) |> 
+      dplyr::rename(Barcode_v2 = Barcode, mb_categories_v2 = mb_categories),
+    by = join_by(Barcode_v2)
+  )
+
+```
+
+
+
+```{r}
+#| fig-height: 6
+#| fig-width: 10
+
+g <- 
+BC_between_visits_with_endpoints |> 
+  arrange(mb_categories_v1) |> 
+  mutate(
+    xlabels = mb_categories_v1 |> str_replace(",", ",\n") |> fct_inorder()
+  ) |> 
+  ggplot(aes(x = xlabels, y = BC, fill = mb_categories_v1, col = mb_categories_v1)) +
+  geom_violin(col = NA, scale = "width", alpha = 0.5, drop = TRUE) +
+  ggbeeswarm::geom_quasirandom(size = 0.5) +
+  # geom_boxplot(alpha = 0.75, outlier.size = 0.5, varwidth = TRUE) +
+  facet_grid(Arm ~ v1_label) +
+  xlab("") +
+  ylab("Bray-Curtis diss.\nbetween current and next visit") +
+  scale_fill_manual("Microbiota category", values = get_topic_colors(c("I","III","IV"))) +
+  scale_color_manual("Microbiota category", values = get_topic_colors(c("I","III","IV"))) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) 
+
+g
+
+```
+```{r}
+
+ggsave(g, filename = str_c(fig_out_dir(), "S2E.pdf"), width = 13, height = 6, device = cairo_pdf)
+
+```
+
+
+
+```{r}
+#| fig-height: 8
+#| fig-width: 10
+
+BC_between_visits_with_endpoints |> 
+  ggplot(aes(x = id, y = BC, fill = mb_categories_v1, col = mb_categories_v1)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.5, varwidth = TRUE) +
+  facet_grid(Arm ~ .) +
+  xlab("") +
+  ylab("Bray-Curtis diss.\nconsecutive v.") +
+  scale_fill_manual("Microbiota category at the previous visit", values = get_topic_colors(c("I","III","IV"))) +
+  scale_color_manual("Microbiota category at the previous visit", values = get_topic_colors(c("I","III","IV"))) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  ) +
+  
+  BC_between_visits_with_endpoints |> 
+  ggplot(aes(x = id, y = BC, fill = mb_categories_v2, col = mb_categories_v2)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.5, varwidth = TRUE) +
+  facet_grid(Arm ~ .) +
+  xlab("") +
+  ylab("Bray-Curtis diss.\nconsecutive v.") +
+  scale_fill_manual("Microbiota category at the next visit", values = get_topic_colors(c("I","III","IV"))) +
+  scale_color_manual("Microbiota category at the next visit", values = get_topic_colors(c("I","III","IV"))) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  ) +
+  
+  plot_layout(nrow = 2) + plot_annotation(tag_levels = "a")
+
+```
+
+
+
+
+## Correlations early and later success?
+
+
+```{r}
+
+cat_levels <- c("≥ 50% L. crispatus", "≥ 50% Lactobacillus,\n< 50% L. crispatus", "< 50% Lactobacillus")
+
+mb_categories_all <- 
+  get_assay_long_format(mae, "mb_categories", values_name = "microbiota_cat") |> 
+  mutate(microbiota_cat = microbiota_cat |> str_replace(", ",",\n") |> factor(levels = cat_levels))
+mb_categories <- mb_categories_all |> filter(!is.na(microbiota_cat))
+
+```
+
+```{r}
+
+mb_categories_wide <- 
+  mb_categories |>
+  arrange(AVISITN) |> 
+  filter(PIPV) |> 
+  pivot_wider(
+    id_cols = c(USUBJID, ARM), 
+    names_from = AVISITN, names_prefix = "category_V",
+    values_from = microbiota_cat
+  )
+
+```
+
+### Week 4 and week 12
+
+```{r}
+
+# week 4 and week 12
+
+tb <- 
+  mb_categories_wide |> 
+  filter(ARM == "LACTIN-V") |> 
+  filter(!is.na(category_V2), !is.na(category_V4)) |> 
+  dplyr::count(category_V2, category_V4) 
+
+```
+
+
+```{r}
+
+tb |>
+  pivot_wider(
+    names_from = category_V4, 
+    values_from = n, 
+    values_fill = 0
+  ) |> 
+  gt(
+    rowname_col = "category_V2",
+    process_md = TRUE,
+    caption = "Number of participants in each category at week 4 and week 12 in the Lactin-V arm.",
+    ) |>
+  tab_stubhead(label = "Category at week 4") |>
+  tab_spanner(
+    label = "Category at week 12",
+    columns = everything()
+  ) |>
+  cols_label(
+    `≥ 50% Lactobacillus,\n< 50% L. crispatus` = html("≥ 50% Lactobacillus,<br>< 50% L. crispatus"),
+  )
+
+```
+
+```{r}
+
+tb |> 
+  group_by(category_V4) |> 
+  mutate(
+    total_n = sum(n),
+    perc = 100 * n / total_n
+  ) |> 
+  ungroup() |> 
+  rowwise() |> 
+  mutate(
+    CI_lo = prop.test(x = n, n = total_n)$conf.int[1] * 100,
+    CI_hi = prop.test(x = n, n = total_n)$conf.int[2] * 100,
+    res = str_c(perc |> round(), "% (", CI_lo |> round(), "% - ", CI_hi |> round(),"%)")
+  ) |> 
+  ungroup() |>
+  select(category_V2, category_V4, res) |>
+  pivot_wider(
+    names_from = category_V4, 
+    values_from = res, 
+    values_fill = ""
+  ) |> 
+  gt(
+    rowname_col = "category_V2",
+    process_md = TRUE,
+    caption = "Percentages by week 12 category (sum to 100% vertically)",
+    ) |>
+  tab_stubhead(label = "Category at week 4") |>
+  tab_spanner(
+    label = "Category at week 12",
+    columns = everything()
+  ) |>
+  cols_label(
+    `≥ 50% Lactobacillus,\n< 50% L. crispatus` = html("≥ 50% Lactobacillus,<br>< 50% L. crispatus"),
+  )
+
+
+```
+
+
+```{r}
+
+tb |> 
+  group_by(category_V2) |> 
+  mutate(
+    total_n = sum(n),
+    perc = 100 * n / total_n
+  ) |> 
+  ungroup() |> 
+  rowwise() |> 
+  mutate(
+    CI_lo = prop.test(x = n, n = total_n)$conf.int[1] * 100,
+    CI_hi = prop.test(x = n, n = total_n)$conf.int[2] * 100,
+    res = str_c(perc |> round(), "% (", CI_lo |> round(), "% - ", CI_hi |> round(),"%)")
+  ) |> 
+  ungroup() |>
+  select(category_V2, category_V4, res) |>
+  pivot_wider(
+    names_from = category_V4, 
+    values_from = res, 
+    values_fill = ""
+  ) |> 
+  gt(
+    rowname_col = "category_V2",
+    process_md = TRUE,
+    caption = "Percentages by week 4 category (sum to 100% horizontally)",
+    ) |>
+  tab_stubhead(label = "Category at week 4") |>
+  tab_spanner(
+    label = "Category at week 12",
+    columns = everything()
+  ) |>
+  cols_label(
+    `≥ 50% Lactobacillus,\n< 50% L. crispatus` = html("≥ 50% Lactobacillus,<br>< 50% L. crispatus"),
+  )
+
+
+```
+
+
+### Week 4 and week 24
+
+
+```{r}
+
+# week 4 and week 24
+
+tb <- 
+  mb_categories_wide |> 
+  filter(ARM == "LACTIN-V") |> 
+  filter(!is.na(category_V2), !is.na(category_V7)) |> 
+  dplyr::count(category_V2, category_V7) 
+
+```
+
+
+```{r}
+
+tb |>
+  pivot_wider(
+    names_from = category_V7, 
+    values_from = n, 
+    values_fill = 0
+  ) |> 
+  gt(
+    rowname_col = "category_V2",
+    process_md = TRUE,
+    caption = "Number of participants in each category at week 4 and week 24 in the Lactin-V arm.",
+    ) |>
+  tab_stubhead(label = "Category at week 4") |>
+  tab_spanner(
+    label = "Category at week 24",
+    columns = everything()
+  ) |>
+  cols_label(
+    `≥ 50% Lactobacillus,\n< 50% L. crispatus` = html("≥ 50% Lactobacillus,<br>< 50% L. crispatus"),
+  )
+
+```
+
+```{r}
+
+tb |> 
+  group_by(category_V7) |> 
+  mutate(
+    total_n = sum(n),
+    perc = 100 * n / total_n
+  ) |> 
+  ungroup() |> 
+  rowwise() |> 
+  mutate(
+    CI_lo = prop.test(x = n, n = total_n)$conf.int[1] * 100,
+    CI_hi = prop.test(x = n, n = total_n)$conf.int[2] * 100,
+    res = str_c(perc |> round(), "% (", CI_lo |> round(), "% - ", CI_hi |> round(),"%)")
+  ) |> 
+  ungroup() |>
+  select(category_V2, category_V7, res) |>
+  pivot_wider(
+    names_from = category_V7, 
+    values_from = res, 
+    values_fill = ""
+  ) |> 
+  gt(
+    rowname_col = "category_V2",
+    process_md = TRUE,
+    caption = "Percentages by week 24 category (sum to 100% vertically)",
+    ) |>
+  tab_stubhead(label = "Category at week 4") |>
+  tab_spanner(
+    label = "Category at week 24",
+    columns = everything()
+  ) |>
+  cols_label(
+    `≥ 50% Lactobacillus,\n< 50% L. crispatus` = html("≥ 50% Lactobacillus,<br>< 50% L. crispatus"),
+  )
+
+
+```
+
+
+```{r}
+
+tb |> 
+  group_by(category_V2) |> 
+  mutate(
+    total_n = sum(n),
+    perc = 100 * n / total_n
+  ) |> 
+  ungroup() |> 
+  rowwise() |> 
+  mutate(
+    CI_lo = prop.test(x = n, n = total_n)$conf.int[1] * 100,
+    CI_hi = prop.test(x = n, n = total_n)$conf.int[2] * 100,
+    res = str_c(perc |> round(), "% (", CI_lo |> round(), "% - ", CI_hi |> round(),"%)")
+  ) |> 
+  ungroup() |>
+  select(category_V2, category_V7, res) |>
+  pivot_wider(
+    names_from = category_V7, 
+    values_from = res, 
+    values_fill = ""
+  ) |> 
+  gt(
+    rowname_col = "category_V2",
+    process_md = TRUE,
+    caption = "Percentages by week 4 category (sum to 100% horizontally)",
+    ) |>
+  tab_stubhead(label = "Category at week 4") |>
+  tab_spanner(
+    label = "Category at week 24",
+    columns = everything()
+  ) |>
+  cols_label(
+    `≥ 50% Lactobacillus,\n< 50% L. crispatus` = html("≥ 50% Lactobacillus,<br>< 50% L. crispatus"),
+  )
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Figure 1 - version 1
+
+```{r}
+
+g_study_timeline <- 
+  plot_png(path = "../../images/illustrations_study timeline compact.png")
+
+```
+
+```{r}
+
+p_week12_comp <- 
+  g_12_LV + 
+  (
+    g_12_P + 
+      theme(strip.text.x = element_text(color = "transparent")) +  
+      plot_layout(tag_level = "new")
+  ) +
+  plot_layout(guides = "collect", ncol = 1) &
+  theme(
+    legend.position = "right", 
+    strip.text.y = element_text(angle = -90, hjust = 0.5)
+  ) 
+
+```
+
+
+
+```{r}
+#| fig-height: 16
+#| fig-width: 13
+#| fig-dpi: 300
+
+fig_1 <- 
+  free(g_study_timeline) + # a 
+  g_sankey_v1 + # b # xlab("") +
+  p_week12_comp + # c
+  g_load_v1 + theme(legend.justification = "left") + # d
+  free(g_topics_comp) + # e
+  free(g_subcommunities_traj) + # f
+  g_BC_successive + # g
+  plot_layout(
+    heights = c(2, 2, 4, 1, 1.5),
+    widths = c(1, 1.05),
+    design = 
+      "AA
+      BF
+      CF
+      DF
+      EG
+    "
+  ) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = 'bold'))
+
+
+fig_1
+
+
+```
+
+
+
+## Figure 1 & 2 - version 2
+
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 10
+#| fig-dpi: 300
+
+fig_1 <- 
+  free(g_study_timeline) + # a 
+  g_sankey_v2 + theme(legend.position = "bottom") + # b # xlab("") +
+  p_week12_comp + # c
+  g_load_v2 + # d
+  plot_layout(
+    heights = c(3, 4, 2),
+    widths = c(1, 1.15),
+    design = 
+      "AA
+      BC
+      DC
+    "
+  ) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = 'bold'))
+
+fig_1
+
+```
+
+
+```{r}
+
+ggsave(fig_1, filename = str_c(fig_out_dir(), "Fig1.pdf"), width = 13, height = 10, device = cairo_pdf)
+
+```
+
+
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 16
+#| fig-dpi: 300
+#| cache: false
+
+
+fig_2 <- 
+  free(g_topics_comp_v2) + # A
+  free(g_subcommunities_traj) + # B
+    g_spaghetti + # C
+  g_BC_successive + # D
+
+  plot_layout(
+    heights = c(4, 1),
+    widths = c(2, 4, 1.5),
+    design = 
+      "ABB
+      CCD
+    "
+  ) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = 'bold'))
+
+fig_2
+
+```
+
+
+
+
+
+
+```{r}
+
+ggsave(fig_2, filename = str_c(fig_out_dir(), "Fig2.pdf"), width = 13, height = 10, device = cairo_pdf)
+
+```
+
+
+
+
+
+## Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>
+
+
+

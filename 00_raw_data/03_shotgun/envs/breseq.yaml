@@ -1,0 +1,5 @@
+channels:
+ - conda-forge
+ - bioconda
+dependencies:
+ - breseq=0.37.1

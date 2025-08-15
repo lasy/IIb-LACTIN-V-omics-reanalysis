@@ -1,0 +1,313 @@
+---
+title: "Baseline microbiota and inflammation by demographic characteristics"
+author: Laura Symul
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+execute:
+  cache: true
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+
+
+# Microbiota composition at baseline (pre-MTZ) by demographic characteristics
+
+
+```{r}
+
+library(tidyverse)
+library(patchwork)
+library(gtsummary)
+library(magrittr)
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+theme_set(theme_publication())
+
+```
+
+```{r}
+
+mae <- load_latest_mae(str_c(data_dir(), "03_augmented_mae/"))
+clin <- MultiAssayExperiment::colData(mae) |> data.frame() |> as_tibble()
+
+```
+
+
+
+## By self-declared race
+
+```{r}
+
+
+assay_name <- "tax_16S_p"
+
+mb_wide <- get_assay_wide_format(mae, assay_name)
+mb_wide <- mb_wide |> mutate(assay = assay |> as.data.frame() |> set_rownames(Barcode))
+mb_wide_v0 <- mb_wide |> filter(AVISITN == 0, !is.na(ARM))
+
+distance <- "bray"
+
+comp_data <- mb_wide_v0$assay
+
+BC_dist <- vegan::vegdist(comp_data, method = distance)
+mds <- cmdscale(BC_dist, k = 4, eig = TRUE)
+
+
+g_eig <-
+  ggplot(tibble(k = 1:20, eig = mds$eig[1:20]), aes(x = k, y = eig)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top eigenvalues", subtitle = str_c('MDS using "',distance,'" on ', assay_name, ' data'))
+
+mds_df <-
+    tibble(
+      PCo1 = mds$points[, 1],
+      PCo2 = mds$points[, 2],
+      PCo3 = mds$points[, 3],
+      PCo4 = mds$points[, 4],
+      Barcode = rownames(mds$points)
+    ) |> 
+    left_join(mb_wide_v0, by = "Barcode")
+
+fit_ARM <- vegan::adonis2(comp_data ~ ARM, data = mb_wide_v0, permutations=999, method=distance)
+fit_RACE <- vegan::adonis2(comp_data ~ RACEGR2, data = mb_wide_v0, permutations=999, method=distance)
+
+fit_SITE <- vegan::adonis2(comp_data ~ ARM + RACEGR2 + SITENAME, data = mb_wide_v0, permutations=999, method=distance)
+
+
+  g_arms <-
+    ggplot(mds_df, aes(x = PCo1, y = PCo2, col = ARM)) +
+    geom_point() +
+    coord_fixed() +
+    theme(legend.position = "right") +
+    annotate(
+      "label", x = Inf, y = Inf, hjust = 1, vjust = 1,
+      label = str_c("p: ", (fit_ARM$`Pr(>F)`[1]) %>% round(2))
+    ) +
+    scale_color_manual("", values = get_arm_colors(), guide = guide_legend(direction = "vertical")) +
+    ggtitle("PCoA by study arm")
+  
+  
+  g_race <-
+    ggplot(mds_df, aes(x = PCo1, y = PCo2, col = RACEGR2)) +
+    geom_point() +
+    coord_fixed() +
+    theme(legend.position = "right") +
+    annotate(
+      "label", x = Inf, y = Inf, hjust = 1, vjust = 1,
+      label = str_c("p: ", (fit_RACE$`Pr(>F)`[1]) %>% round(6))
+    ) +
+    scale_color_manual(
+      "Self-declared race", values = c("purple1", "darkseagreen2", "gold3"), 
+      guide = guide_legend(direction = "vertical")
+    ) +
+    ggtitle("PCoA by participants' self-declared race")
+  
+  
+  g_site <-
+    ggplot(mds_df, aes(x = PCo1, y = PCo2, col = SITENAME)) +
+    geom_point() +
+    coord_fixed() +
+    theme(legend.position = "right") +
+    annotate(
+      "label", x = Inf, y = Inf, hjust = 1, vjust = 1,
+      label = str_c("p: ", (fit_SITE$`Pr(>F)`[1]) |> round(3))
+    ) +
+    scale_color_brewer(
+      "Study site", type = "qual", palette = 7,
+      guide = guide_legend(direction = "vertical")
+    ) +
+    ggtitle("PCoA by study site")
+  
+  
+  
+```
+
+```{r}
+#| fig-height: 8
+#| fig-width: 16
+
+g_arms + 
+  g_race +
+  plot_spacer() +
+  g_site +
+  
+  plot_layout(ncol = 2, widths = c(1, 1.2))
+
+
+```
+
+
+
+```{r}
+
+df_load <- clin |> select(USUBJID, AVISITN, LOAD, RACEGR2) |> filter(AVISITN == 1)
+
+g_load <- 
+  df_load |> filter(!is.na(LOAD)) |> 
+  ggplot() +
+  aes(x = RACEGR2, y = log10(LOAD + 1), fill = RACEGR2) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NULL) +
+  geom_point(alpha = 0.5) +
+  labs(
+    x = "Self-declared race",
+    y = "log10(post-MTZ total bacterial load + 1)"
+  ) +
+  scale_fill_manual(
+    "Self-declared race", values = c("purple1", "darkseagreen2", "gold3")
+  ) +
+  guides(fill = "none")
+
+df_shannon_v0 <-
+  mb_wide_v0 |>
+  mutate(
+    shannon_v0 = assay |>  vegan::diversity(index = "shannon")
+  ) |> 
+  select(USUBJID, shannon_v0)
+
+df_load <- df_load |> left_join(df_shannon_v0, by = join_by(USUBJID)) 
+
+g_shannon <- 
+  df_load |> filter(!is.na(shannon_v0)) |> 
+  ggplot() +
+  aes(x = RACEGR2, y = shannon_v0, fill = RACEGR2) +
+   geom_boxplot(alpha = 0.5, outlier.shape = NULL) +
+  geom_point(alpha = 0.5) +
+  labs(
+    x = "Self-declared race",
+    y = "pre-MTZ α-diversity\n(Shannon index on taxa proportions)"
+  ) +
+  scale_fill_manual(
+    "Self-declared race", values = c("purple1", "darkseagreen2", "gold3")
+  ) +
+  guides(fill = "none")
+
+g_lm <- 
+  df_load |> 
+  filter(!is.na(LOAD), !is.na(shannon_v0)) |> 
+  ggplot(aes(x = shannon_v0, y = log10(LOAD + 1))) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = 'y ~ x') +
+  labs(
+    x = "pre-MTZ α-diversity\n(Shannon index on taxa proportions)",
+    y = "log10(post-MTZ total bacterial load + 1)"
+  )
+
+```
+
+
+```{r}
+#| fig-height: 4
+#| fig-width: 10
+
+g_load + g_shannon + g_lm 
+
+```
+
+## Summarizing figure
+
+
+
+```{r}
+
+race_and_edu <- 
+  mae@colData |>
+  as_tibble() |> 
+  filter(ARM %in% c("LACTIN-V", "Placebo"), !is.na(EDULVL)) |> 
+  select(USUBJID, RACEGR1, RACEGR2, EDULVL) |> 
+  distinct() |> 
+  mutate(RACEGR2 = RACEGR2 |>  fct_relevel("Other", after = 1)) |> 
+  arrange(RACEGR2) |> 
+  mutate(RACEGR2 = RACEGR2 |> as.character() |> str_wrap(15) |> fct_inorder())
+
+
+(Xsq <- chisq.test(table(race_and_edu$EDULVL, race_and_edu$RACEGR2), simulate.p.value = TRUE))
+
+t_1 <- race_and_edu |> dplyr::count(RACEGR2, EDULVL) 
+
+g_1 <- 
+  ggplot(t_1, aes(x = RACEGR2, y = EDULVL, fill = RACEGR2)) +
+  geom_tile(aes(alpha = n)) +
+  geom_text(aes(label = n)) + 
+  # scale_alpha(range = c(0,1)) +
+  # scale_fill_gradient(low = "white", high = "steelblue") +
+  xlab("Self-declared participants' race") + ylab("Education") +
+  scale_fill_manual(values = c("purple1", "darkseagreen3", "gold3")) +
+  guides(fill = "none", alpha = "none") +
+  theme(
+    axis.title.y = element_text(angle = 0, hjust = 1, vjust = 1, margin = margin(r = -80))
+  )
+
+
+```
+```{r}
+
+df_shannon_v0 <-
+  get_assay_wide_format(mae, "tax_16S_p", add_colData = FALSE) |> 
+  mutate(
+    shannon_v0 = assay |>  vegan::diversity(index = "shannon")
+  ) |> 
+  select(Barcode, shannon_v0) |> 
+  left_join(
+    mae@colData |> 
+      as_tibble() |> 
+      select(Barcode, USUBJID, ARM, AVISITN, RACEGR2) |> 
+      distinct(), 
+    by = join_by(Barcode)
+    ) |> 
+  filter(AVISITN == 0, !is.na(ARM))
+
+lm(shannon_v0 ~ RACEGR2, data = df_shannon_v0 |> mutate(RACEGR2 = RACEGR2 |> fct_relevel("White"))) |> summary()
+
+g_shannon <- 
+  df_shannon_v0 |> 
+  ggplot() +
+  aes(x = RACEGR2, y = shannon_v0, fill = RACEGR2) +
+  # geom_boxplot(alpha = 0.5, outlier.shape = NULL) +
+  geom_violin(alpha = 0.5, draw_quantiles = 0.5, color = "white", linewidth = 1) +
+  # geom_point(alpha = 0.5) +
+  ggbeeswarm::geom_quasirandom(width = 0.3, size = 0.5, aes(col = RACEGR2)) +
+  labs(
+    x = "Self-declared race",
+    y = "pre-MTZ α-diversity\n(Shannon index on taxa proportions)"
+  ) +
+  scale_fill_manual(
+    "Self-declared race", values = c("purple1", "darkseagreen3", "gold3")
+  ) +
+  scale_color_manual(
+    "Self-declared race", values = c("purple1", "darkseagreen3", "gold3")
+  ) +
+  guides(fill = "none", col = "none")
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 5
+
+i <- 2
+
+g <- 
+g_1 + labs(tag = LETTERS[i]) + 
+  g_shannon + labs(tag = LETTERS[i + 1])
+
+g
+
+```
+
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S7BC.pdf"), width = 13, height = 4, device = cairo_pdf)
+
+```

@@ -1,0 +1,610 @@
+---
+title: "Subject level data"
+format: 
+  html:
+    code-fold: true
+execute:
+  cache: true
+project:
+  execute-dir: project
+---
+
+The `ADSL` table contains basic subject-level data.
+
+The subject ID is coded in two distinct variables: `USUBJID` and `SUBJID`. We use `USUBJID` as it is provided in all tables (`SUBJID` is only present in a few table).
+
+```{r}
+
+if( !("ADSL" %in% ls())) {
+  ADSL <- readxl::read_xlsx(stringr::str_c(ADaM_dir, "ADSL.xlsx"), guess_max = 10000)
+}
+
+```
+
+## Study Site
+
+```{r}
+
+ADSL %>% 
+  group_by(SITENAME) %>% 
+  summarize(`n participants` = n()) %>% 
+  knitr::kable()
+
+variable_info <- 
+  bind_rows(
+    variable_info,
+    tibble(var = "SITENAME", label = "Study site", 
+           type = "factor", group = "Study info")
+  )
+
+factor_values <- 
+  bind_rows(
+    factor_values,
+    tibble(var = "SITENAME", 
+           values = c("San Francisco General Hospital", 
+                          "Stroger Hospital of Cook County",
+                          "University of California, San Diego",
+                          "Washington University in St. Louis"), 
+           colors = wesanderson::wes_palette("Darjeeling1",5)[-1]
+    )
+  )
+  
+```
+
+## Study arms and participant groups
+
+
+
+```{r}
+
+tmp <- 
+  bind_rows(
+    tibble(var = "ITTFL", 
+           label = "Intention-to-Treat (LOCF)"),
+    tibble(var = "MITTV4FL", 
+           label = "Modified-Intention-to-Treat (LOCF) [week 12]"),
+    tibble(var = "CCV4FL", 
+           label = "Complete Case [week 12]"),
+    tibble(var = "PPSRV4FL",
+           label =  "Per-Protocol (self-report) [week 12]"),
+    tibble(var = "PPSTV4FL", 
+           label = "Per-Protocol (by applicator staining) [week 12]"),
+    tibble(var = "MITTV7FL", 
+           label = "Modified-Intention-to-Treat (LOCF) [week 24]"),
+    tibble(var = "CCV7FL", 
+           label = "Complete Case [week 24]"),
+    tibble(var = "PPSRV7FL", 
+           label =  "Per-Protocol (self-report) [week 24]"),
+    tibble(var = "PPSTV7FL", 
+           label = "Per-Protocol (by applicator staining) [week 24]"),
+  ) %>% 
+  mutate(
+    type = "logical",
+    group = "Treatment group"
+  )
+
+variable_info <- 
+  bind_rows(
+    variable_info,
+    tibble(var = "ARM", label = "Study arm", type = "factor", group = "Study info"),
+    tmp
+  )
+
+factor_values <- 
+  bind_rows(
+    factor_values,
+    tibble(var = "ARM", values = c("LACTIN-V", "Placebo"), 
+           colors = c("turquoise3","gray60"))
+  )
+
+
+ADSL %>% 
+  select(USUBJID, ARM, all_of(tmp$var)) %>% 
+  pivot_longer(
+    cols = all_of(tmp$var),
+    names_to = "treatment_group",
+    values_to = "belongs_to_treatment_group"
+  ) %>% 
+  left_join(
+    tmp %>% 
+      select(var, label) %>% 
+      rename(treatment_group = var,
+             `treatment group` = label), 
+    by = "treatment_group"
+  ) %>% 
+  filter(belongs_to_treatment_group == "Y") %>% 
+  group_by(ARM, `treatment group`) %>% 
+  summarize(n = n(), .groups = "drop") %>% 
+  select(`treatment group`, ARM, n) %>% 
+  mutate(
+    `treatment group` = 
+      `treatment group` %>% factor(., levels = tmp$label)) %>% 
+  arrange(`treatment group`) %>% 
+  pivot_wider(id_cols = `treatment group`, names_from = ARM, values_from = n) %>% 
+  knitr::kable()
+
+
+```
+
+## Demographic variables
+
+### Race
+
+```{r}
+
+ADSL_race_cols <- colnames(ADSL) |> str_subset("RACE")
+
+```
+
+
+There are `r length(ADSL_race_cols)` columns in the `ADSL` table that are related to the participants' race: `r str_c(ADSL_race_cols, collapse = ", ")`.
+The number of participants for each combination of these columns is:
+
+```{r}
+
+ADSL |> 
+  select(all_of(ADSL_race_cols)) |>
+  count(across(all_of(ADSL_race_cols))) |> 
+  arrange(-n) |> 
+  knitr::kable()
+
+```
+
+We preserve the variables `RACEGR1` and `RACEGR2`. The other variables are not used in the analysis.
+
+```{r}
+
+variable_info <- 
+  variable_info  %>% 
+  bind_rows(
+    tibble(var = "RACEGR1", label = "Race", type = "factor", group = "Demographics"),
+    tibble(var = "RACEGR2", label = "Race", type = "factor", group = "Demographics"),
+  )
+
+factor_values <- 
+  factor_values %>% 
+  bind_rows(
+    tibble(var = "RACEGR1", 
+           values = c("American Indian or Alaska Native", 
+                          "Asian","Black or African American", 
+                          "Native Hawaiian or Other Pacific Islander",
+                          "White","Multi-Racial", "Unknown"),
+           colors = c(rainbow(n = 5, s = 0.8, v = 0.8),"black","gray")),
+    tibble(var = "RACEGR2", 
+           values = c("Black/African American", "White","Other"),
+           colors = c("darkseagreen4","darkseagreen1","darkseagreen3")),
+  )
+
+
+ADSL %>% 
+  select(RACEGR2, RACEGR1) %>% 
+  group_by(across(everything())) %>% 
+  summarize(n = n(), .groups = "drop") %>% 
+  arrange(-n) |> 
+  group_by(RACEGR2) |> 
+  mutate(`tot RACEGR2` = ifelse(row_number() == 1, sum(n) |> as.character(), "")) |> 
+  knitr::kable()
+
+```
+
+
+### Ethnicity
+
+
+```{r}
+
+ADSL_ethn_cols <- colnames(ADSL) |> str_subset("ETHN")
+
+```
+
+
+There are `r length(ADSL_ethn_cols)` columns in the `ADSL` table that are related to the participants' race: `r str_c(ADSL_ethn_cols, collapse = ", ")`.
+The number of participants for each combination of these columns is:
+
+```{r}
+
+ADSL |> 
+  select(all_of(ADSL_ethn_cols)) |>
+  count(across(all_of(ADSL_ethn_cols))) |> 
+  arrange(-n) |> 
+  knitr::kable()
+
+```
+
+We preserve the `ETHNIC` variable, as the other one is redundant and less informative.
+
+```{r}
+
+variable_info <- 
+  variable_info  %>% 
+  bind_rows(
+    tibble(var = "ETHNIC", label = "Ethnicity", type = "factor", group = "Demographics")
+  )
+
+factor_values <- 
+  factor_values %>% 
+  bind_rows(
+    tibble(var = "ETHNIC", 
+           values = c("NOT HISPANIC OR LATINO", 
+                          "HISPANIC OR LATINO", 
+                          "NOT REPORTED",
+                          "UNKNOWN"),
+           colors = c("darkorchid4","darkorchid1","gray60","gray80"))
+  )
+
+
+```
+
+The number of participants per racial and ethic group is as follow:
+
+```{r}
+
+ADSL %>% 
+  select(ETHNIC, RACEGR2) %>% 
+  filter(str_detect(ETHNIC, "HISPANIC")) %>% 
+  group_by(across()) %>% 
+  summarize(n = n(), .groups = "drop") %>% 
+  arrange(-n) %>% 
+  pivot_wider(id_cols = ETHNIC, names_from = RACEGR2, values_from = n) %>% 
+  knitr::kable()
+
+```
+
+
+
+### Age
+
+The distribution of participant's age by study arm is:
+
+```{r}
+
+variable_info <- 
+  variable_info  %>% 
+  bind_rows(
+    tibble(var = "AGE", label = "Age", type = "integer", group = "Demographics")
+  )
+
+ADSL %>% 
+  select(ARM, AGE) %>% 
+  mutate(
+    AGE = AGE %>% as.integer(),
+    ARM = ARM |> factor(levels = c("LACTIN-V", "Placebo", "Screen Failure", "Not Assigned"))
+    ) %>% 
+  ggplot(., aes(x = AGE, fill = ARM)) +
+  geom_histogram(binwidth = 1) +
+  facet_grid(ARM ~ .) +
+  guides(fill = "none") +
+  scale_fill_brewer(type = "qual")
+
+
+```
+
+### Education
+
+Education data is stored in the `SUPPSV` table, which is in long format.
+
+```{r}
+
+SUPPSV <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "SUPPSV.xlsx"), guess_max = 10000)
+# SUPPSV contains data for many variables. 
+# The two of interest are Years of formal education (LVDEDYRS) and education level (LVDEDLVL)
+
+```
+
+```{r}
+
+variable_info <- 
+  variable_info  %>% 
+  bind_rows(
+    tibble(var = "EDULVL", label = "Level of education", type = "factor", group = "Demographics"),
+    tibble(var = "EDUYRS", label = "Years of formal education", type = "integer", group = "Demographics")
+  )
+
+
+factor_values <- 
+  factor_values %>% 
+  bind_rows(
+    tibble(var = "EDULVL", 
+           values = 
+             c("Did not complete high school", 
+               "Completed high school", 
+               "Completed junior college",
+               "Completed college (undergraduate degree)",
+               "Completed graduate degree"),
+           colors = c("lightsteelblue1","lightsteelblue2","lightsteelblue3","lightsteelblue4","gray20"))
+  )
+
+```
+
+
+
+We filter for the `QNAM` variables of interest (`LVDEDYRS` and `LVDEDLVL`), and then pivot the table to wide format.
+
+```{r}
+
+EDU <- 
+  SUPPSV %>% 
+  filter(QNAM %in% c("LVDEDYRS", "LVDEDLVL")) %>% 
+  select(USUBJID, QNAM, QVAL) %>% 
+  mutate(QNAM = ifelse(QNAM == "LVDEDLVL", "EDULVL", "EDUYRS")) %>% 
+  pivot_wider(
+    id_cols = USUBJID,
+    names_from = QNAM,
+    values_from = QVAL
+  ) %>% 
+  mutate(
+    EDUYRS = EDUYRS %>% as.integer(),
+    EDULVL = EDULVL %>% factor(., levels = get_fct_values("EDULVL"))
+  )
+
+```
+
+The distribution of years of education, grouped by education level, is:
+
+
+```{r}
+#| fig-height: 4  
+
+ggplot(EDU, aes(x = EDUYRS, fill = EDULVL)) +
+  geom_histogram(binwidth = 1) +
+  scale_fill_manual(
+    get_print_name("EDULVL"), 
+    breaks = get_fct_values("EDULVL"), values = get_fct_colors("EDULVL")
+    ) +
+  xlab(get_print_name("EDUYRS"))
+
+```
+
+
+```{r}
+
+ADSL <- ADSL %>% left_join(., EDU, by = join_by(USUBJID))
+
+```
+
+
+
+
+
+
+## Treatment and study start and end dates
+
+
+```{r}
+
+date_format <-  "%d%b%Y"
+
+variable_info <- 
+  variable_info  %>% 
+  bind_rows(
+    tibble(var = "EOSDY", label = "Study length (days)", 
+           type = "integer", group = "Study variable"),
+    tibble(var = "NUMDOSE", label = "Number of doses received", 
+           type = "integer", group = "Study variable"),
+    tibble(var = "EOSSTT", label = "Status at end of study", 
+           type = "factor", group = "Study variable")
+  )
+
+
+
+factor_values <- 
+  factor_values %>% 
+  bind_rows(
+    tibble(var = "EOSSTT", 
+           values = c("COMPLETED", "DISCONTINUED"),
+           colors = c("cornflowerblue","coral"))
+  )
+
+```
+
+
+```{r}
+
+study_dates_var <-
+  bind_rows(
+    tibble(var = "TRTSDT", label = "Treatment start date",
+           type = "Date", group = "Study variable"),
+    tibble(var = "TRTEDT", label = "Treatment end date",
+           type = "Date", group = "Study variable"),
+    tibble(var = "EOSDT", label = "Study end date",
+           type = "Date", group = "Study variable")
+  )
+
+```
+
+
+There are columns in the  `ADSL` table that refer to study dates are: `r str_c(study_dates_var$var, collapse = ", ")`
+
+```{r}
+#| fig-height: 7
+
+ADSL %>% 
+  select(SITENAME, USUBJID, EOSSTT, all_of(study_dates_var$var)) %>% 
+  mutate(
+    across(.cols = all_of(study_dates_var$var), 
+           .fns = \(x) as.Date(x, format = date_format))
+  ) %>% 
+  filter(!is.na(TRTSDT)) %>% 
+  pivot_longer(
+    cols = all_of(study_dates_var$var),
+    names_to = "event",
+    values_to = "Date"
+  ) %>% 
+  left_join(
+    study_dates_var %>% 
+      select(var, label) %>% 
+      rename(event = var, Event = label), 
+    by = "event"
+  ) %>% 
+  mutate(Event = Event |> factor(levels = study_dates_var$label)) |> 
+  ggplot(
+    aes(x = Date, y = USUBJID)
+  ) +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = Event, shape = EOSSTT), alpha = 0.5) +
+  scale_y_discrete(breaks = NULL)  +
+  scale_color_brewer(type = "qual", palette = "Set1") +
+  scale_shape_manual("End-of-study status", values = c(19, 1))
+
+```
+
+Since these are potentially identifying information, we do not keep them in the final table, and only keep the study length instead.
+
+
+## Number of doses taken by participants
+
+
+```{r}
+#| fig-height: 4  
+
+
+ADSL %>% 
+  select(SITENAME, USUBJID, NUMDOSE, ARM, EOSSTT) %>% 
+  filter(ARM == get_fct_values("ARM"), !is.na(NUMDOSE)) %>% 
+  ggplot(
+    aes(x = NUMDOSE, fill = EOSSTT)
+  ) +
+  geom_histogram(binwidth = 1) +
+  facet_grid(ARM ~ .) +
+  xlab(get_print_name("NUMDOSE")) +
+  scale_fill_brewer("End-of-study status", type = "qual")
+
+
+```
+
+
+
+## Previous episodes of BV
+
+The number of previous BV episodes reported by participants is availble in the `QS` table. 
+We create a new variable `N_PAST_BV` that will be used in the analysis.
+
+
+```{r}
+
+QS <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "QS.xlsx"), guess_max = 10000)
+# ADQS <- readxl::read_xlsx(stringr::str_c(ADaM_dir, "ADQS.xlsx"), guess_max = 10000)
+
+variable_info <- 
+  bind_rows(
+    variable_info,
+    tibble(var = "N_PAST_BV",label =  "Count of past BV episodes",
+    type = "factor", group = "BV")
+  )
+
+factor_values <- 
+  bind_rows(
+    factor_values,
+    tibble(
+      var = "N_PAST_BV",
+      values = c("None","1-2","3-4","5 or more","Unknown"),
+      colors = c(colorRampPalette(colors = c("skyblue","red"))(4), "gray80")
+    )
+  )
+
+previous_BV <- 
+  QS %>% 
+  filter(QSTEST == "Count of BV episodes") %>% 
+  mutate(
+    N_PAST_BV = 
+      QSORRES %>% 
+      str_to_sentence() %>% 
+      factor(., levels = get_fct_values("N_PAST_BV"))
+    ) %>% 
+  select(USUBJID, N_PAST_BV)
+
+```
+
+
+The distribution of self-reported previous BV episodes is:
+
+
+
+```{r}
+#| fig-height: 3.5 
+
+ggplot(previous_BV, aes(x = N_PAST_BV)) +
+  geom_bar() +
+  xlab("Number of past BV")
+
+```
+
+
+
+## Time since last MTZ dose at Visit 1
+
+We wanted to check if the "time since last MTZ dose" had been recorded in the database. Unfortunately, this information has not been encoded digitally:
+
+![](images/last_MTZ_dose-01.png)
+
+But we note that individuals who failed to take all 5 doses of MTZ or to take their last dose within 48h of Visit 1 were ineligible. 
+
+```{r}
+
+# SUPPSV <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "SUPPSV.xlsx"), guess_max = 10000)
+# already loaded
+
+SUPPSV |> 
+  select(QNAM, QLABEL) |> 
+  filter(str_detect(QLABEL, "Metro")) |> 
+  distinct()
+
+SUPPSV %>% filter(QNAM == "LVDMETRO") %>% select(QNAM,QLABEL, QVAL) %>% group_by(QVAL, QLABEL) %>% count()
+
+```
+
+The table above shows that all included participants did successfully completed the MTZ regimen.
+
+
+## Building the Subject-level table
+
+We can now build the subject-level table.
+
+The variables included in this tables are:
+
+```{r}
+
+# study_dates_vars <- variable_info$var[which(variable_info$type == "Date")]
+logical_vars <- variable_info$var[which(variable_info$type == "logical")]
+
+subjects <- 
+  ADSL %>% 
+  filter(ARM %in% get_fct_values("ARM")) %>% 
+  left_join(., previous_BV, by = "USUBJID") %>% 
+  select(all_of(variable_info$var[variable_info$group != "Events"])) %>% 
+  mutate(
+    SITENAME = SITENAME %>% factor(),
+    ARM = ARM %>% factor(., levels = get_fct_values("ARM")),
+    RACEGR1 = RACEGR1 %>% factor(., levels = get_fct_values("RACEGR1")),
+    RACEGR2 = RACEGR2 %>% factor(., levels = get_fct_values("RACEGR2")),
+    ETHNIC = ETHNIC %>% factor(., levels = get_fct_values("ETHNIC")),
+    AGE = AGE %>% as.integer(),
+    across(
+      .cols = all_of(logical_vars),
+      .fns = function(x) ifelse(x == "Y", TRUE, FALSE)
+    ),
+    # across(
+    #   .cols = all_of(study_dates_vars),
+    #   .fns = function(x) as.Date(x, format = date_format)
+    # ),
+    EOSSTT = EOSSTT %>% factor(., levels = get_fct_values("EOSSTT"))
+  ) 
+
+
+```
+
+```{r}
+
+variable_info %>% filter(var %in% colnames(subjects)) %>% 
+  knitr::kable(caption = "columns of the `subjects` tables")
+
+```
+
+
+The `subjects` table has `r nrow(subjects)` rows and `r ncol(subjects)` columns.
+
+
+
+
+
+

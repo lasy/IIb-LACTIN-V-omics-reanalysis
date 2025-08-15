@@ -1,0 +1,60 @@
+rule target:
+    input:
+       "temp/finished_timestamp"
+
+rule luminex_qc:
+    input:
+        "output/qc_reports/luminex_qc_{run_id}.html"
+
+rule rclone_download_data:
+    output:
+        touch("temp/raw_luminex/data_downloaded_timestamp")
+    shell:
+        "mkdir -p temp/raw_luminex && ~/miniconda3/bin/rclone copy -v  kwon_dropbox:Gates\ LACTIN-V/Luminex_data/raw temp/raw_luminex"
+
+rule parse_luminex:
+    input:
+        download_flagfile = "temp/raw_luminex/data_downloaded_timestamp",
+        sample_manual_choices = "input/sample_manual_choices.csv"
+    output:
+        count_table = "output/00.parse_luminex/count_table.csv",
+        net_mfi_table = "output/00.parse_luminex/net_mfi_table.csv",
+        concentration_table = "output/00.parse_luminex/concentration_table.csv",
+        standards_table = "output/00.parse_luminex/standard_extents.csv"
+    conda:
+        "envs/tidyverse.yaml"
+    script:
+        "scripts/00.luminex_parse_luminex.R"
+
+rule luminex_process_samples:
+    input:
+        count_table = "output/00.parse_luminex/count_table.csv",
+        net_mfi_table = "output/00.parse_luminex/net_mfi_table.csv",
+        concentration_table = "output/00.parse_luminex/concentration_table.csv",
+        standards_table = "output/00.parse_luminex/standard_extents.csv"
+    output:
+        parsed_concentration = "output/luminex_concentrations.csv"
+    conda:
+        "envs/tidyverse.yaml"
+    script:
+        "scripts/01.luminex_process_samples.R"
+
+rule create_summarised_experiment:
+    input:
+        parsed_concentration = "output/luminex_concentrations.csv"
+    output:
+        summarised_experiment = "output/luminex_summarised_experiment.RDS"
+    conda:
+        "envs/tidyverse.yaml"
+    script:
+        "scripts/02.create_summarised_experiment.R"
+
+rule rclone_upload_parsed:
+    input:
+        summarised_experiment = "output/luminex_summarised_experiment.RDS",
+        parsed_concentration = "output/luminex_concentrations.csv"
+    output:
+        touch("temp/finished_timestamp")
+    shell:
+        "~/miniconda3/bin/rclone copy -v {input.parsed_concentration} kwon_dropbox:Gates\ LACTIN-V/Luminex_data/processed; "
+        "~/miniconda3/bin/rclone copy -v {input.summarised_experiment} kwon_dropbox:Gates\ LACTIN-V/Luminex_data/processed; "

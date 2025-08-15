@@ -1,0 +1,368 @@
+---
+title: "Are '-omics' datasets balanced at V0 and V1"
+format: html
+editor: visual
+---
+
+# Checking for arm differences at baseline?
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(patchwork)
+library(gtsummary)
+
+theme_set(theme_light())
+
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+
+```
+
+
+
+```{r}
+
+mae <- load_latest_mae(str_c(data_dir(), "03_augmented_mae/"))
+clin <- MultiAssayExperiment::colData(mae) |> data.frame() |> as_tibble()
+
+```
+
+In this documents, we perform a series of check to ensure that the two groups (Lactin-V and placebo recipients) have similar characteristics at baseline.
+
+For each of the domains (demographic variables, microbiota composition, cytokine/chemokine concentrations, behavioral variable), we check that balance for participants included for evaluating the **primary outcome** (= *L. crispatus* ≥ 50%) at **week 12**. We also repeat that analysis for participants with 16S data at **week 24**.
+
+```{r}
+
+week12_participants <- clin$USUBJID[!is.na(clin$AVISITN) & (clin$AVISITN == 4)]
+week24_participants <- clin$USUBJID[!is.na(clin$AVISITN) & (clin$AVISITN == 7)]
+
+```
+
+## Demographics ("Table 1")
+
+```{r}
+
+dem_data <- 
+  MultiAssayExperiment::colData(mae[,,"ASV_16S"]) |> 
+  as_tibble() |> 
+  select(USUBJID, ARM, AGE, RACEGR2, ETHNIC,  EDULVL, N_PAST_BV) |> 
+  dplyr::rename(
+    Age = AGE,
+    `Self-declared race` = RACEGR2,
+    Ethnicity = ETHNIC,
+    Education = EDULVL,
+    `Nb of past BV episodes` = N_PAST_BV
+  )
+
+```
+
+```{r}
+
+dem_data |> 
+  filter(USUBJID %in% week12_participants) |> 
+  distinct() |> 
+  select(-USUBJID) |> 
+  tbl_summary(by = ARM) |> 
+  add_p() |> 
+  modify_caption(caption = "Demographic variables of participants with microbiota composition data at week 12")
+
+
+```
+
+```{r}
+
+dem_data |> 
+  filter(USUBJID %in% week24_participants) |> 
+  distinct() |> 
+  select(-USUBJID) |> 
+  tbl_summary(by = ARM) |> 
+  add_p() |> 
+  modify_caption(caption = "Demographic variables of participants with microbiota composition data at week 24")
+
+```
+
+## -omics at baseline (pre- and post-MTZ)
+
+### 16S rRNA sequencing data
+
+**Species composition**
+
+```{r}
+
+species <- MultiAssayExperiment::assay(mae, "tax_16S_p") %>% t()
+
+```
+
+We first compare the species composition at the first two visits (pre- and post-MTZ) for participants included for primary outcome at week 12.
+
+```{r}
+#| fig-width: 13
+#| fig-height: 4
+
+PCoA_baseline(
+  mae = mae, assay_name = "tax_16S_p", 
+  visit = 0, included_participants = week12_participants
+  )
+
+PCoA_baseline(
+  mae = mae, assay_name = "tax_16S_p", 
+  visit = 1, included_participants = week12_participants
+  )
+
+```
+
+And for participants with microbiota composition at week 24.
+
+```{r}
+#| fig-width: 13
+#| fig-height: 4
+
+PCoA_baseline(
+  mae = mae, assay_name = "tax_16S_p", 
+  visit = 0, included_participants = week24_participants
+  )
+
+PCoA_baseline(
+  mae = mae, assay_name = "tax_16S_p", 
+  visit = 1, included_participants = week24_participants
+  )
+
+```
+
+**ASV composition**
+
+```{r}
+#| fig-width: 13
+#| fig-height: 4
+
+set.seed(12345)
+
+g1 <- 
+PCoA_baseline(
+  mae = mae, assay_name = "ASV_16S_filtered", 
+  visit = 0, included_participants = week12_participants
+)
+
+g2 <- 
+PCoA_baseline(
+  mae = mae, assay_name = "ASV_16S_filtered", 
+  visit = 1, included_participants = week12_participants
+)
+
+g1
+
+g2
+
+
+```
+
+
+```{r}
+
+
+  ggsave(g1, filename = str_c(fig_out_dir(), "S1B.pdf"), width = 13, height = 4, device = cairo_pdf)
+
+```
+
+```{r}
+
+  ggsave(g2, filename = str_c(fig_out_dir(), "S1C.pdf"), width = 13, height = 4, device = cairo_pdf)
+
+```
+
+
+
+And for participants with microbiota composition at week 24.
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 4
+
+set.seed(12345)
+
+PCoA_baseline(
+  mae = mae, assay_name = "ASV_16S_filtered", 
+  visit = 0, included_participants = week24_participants
+)
+
+PCoA_baseline(
+  mae = mae, assay_name = "ASV_16S_filtered", 
+  visit = 1, included_participants = week24_participants
+)
+
+
+```
+
+**Topic composition**
+
+```{r}
+
+gammas <- 
+  get_assay_long_format(
+    mae, assayname = "c_topics_16S_8", add_rowData = TRUE,
+    feature_name = "topic", values_name = "prop"
+    )
+
+```
+
+```{r}
+#| fig-height: 4
+#| fig-width: 10
+
+plot_topic_composition_1_visit(gammas, visit = 0) +
+  labs(subtitle = "Screening visit")
+
+
+```
+
+
+```{r}
+
+test_v0 <- test_topic_comp_by_ARM(gammas, visit = 0)
+test_v0$full %>% summary()
+
+anova(test_v0$full, test_v0$null)
+
+```
+
+No significant differences in microbiota composition at baseline when characterizing microbiota with topic composition.
+
+```{r}
+#| fig-height: 4
+#| fig-width: 10
+
+plot_topic_composition_1_visit(gammas, visit = 1) +
+  labs(subtitle = "Randomization visit")
+
+
+```
+
+```{r}
+
+test_v1 <- test_topic_comp_by_ARM(gammas, visit = 1)
+test_v1$full |> summary()
+
+anova(test_v1$full, test_v1$null)
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+
+gammas |> 
+  filter(AVISITN %in% 0:1, EOSSTT == "COMPLETED", !is.na(ARM)) |> 
+  ggplot() +
+  aes(x = topic_label, y = prop, fill = ARM) +
+  geom_boxplot(outlier.size = 0.5) +
+  facet_grid(. ~ ifelse(AVISITN == 0, "Screening (pre-MTZ)", "Randomization (post-MTZ)") |> fct_inorder()) +
+  scale_fill_manual("", values = get_arm_colors()) +
+  theme(
+    strip.background = element_rect(fill = "gray", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+    ) +
+  xlab("Topic")
+
+```
+
+At the randomization visit, there are slightly more participants with subcommunity IV-B in the Placebo arm than in the Lactin-V arm.
+
+**CST distribution**
+
+```{r}
+
+CSTs <- 
+  get_assay_wide_format(mae, "CST") |>  
+  unnest(cols = c(assay)) |> 
+  mutate(Visit = str_c("Visit ", AVISITN))
+  
+```
+
+For participants with microbiota data at week 12
+
+```{r}
+
+week12_CSTs <- 
+  CSTs |> filter(AVISITN %in% 0:1, USUBJID %in% week12_participants)
+
+ week12_CSTs |> 
+  ggplot(aes(x = subCST, fill = CST)) +
+  geom_bar() +
+  facet_grid(ARM ~ Visit, scales = "free_y") +
+  ylab("Nb of participants") +
+   scale_fill_manual(values = get_topic_colors(week12_CSTs$CST |> unique() |> sort()))
+
+
+week12_CSTs_V0 <- 
+  week12_CSTs |> 
+  filter(AVISITN == 0) |>  
+  select(subCST, ARM)
+
+(
+  V0_chisq <- 
+    chisq.test(table(week12_CSTs_V0), simulate.p.value = TRUE)
+)
+
+
+week12_CSTs_V1 <- 
+  week12_CSTs |> 
+  filter(AVISITN == 1) |>  
+  select(subCST, ARM)
+
+(
+  V1_chisq <- 
+    chisq.test(table(week12_CSTs_V1), simulate.p.value = TRUE)
+)
+
+
+
+```
+
+For participants with microbiota data at week 24
+
+```{r}
+
+week24_CSTs <- 
+  CSTs |> filter(AVISITN %in% 0:1, USUBJID %in% week24_participants)
+
+ week24_CSTs |> 
+  ggplot(aes(x = subCST, fill = CST)) +
+  geom_bar() +
+  facet_grid(ARM ~ Visit, scales = "free_y") +
+  ylab("Nb of participants") +
+   scale_fill_manual(values = get_topic_colors(week12_CSTs$CST |> unique() |> sort()))
+
+week24_CSTs_V0 <- 
+  week24_CSTs |> 
+  filter(AVISITN == 0) |>  
+  select(subCST, ARM)
+
+(
+  V0_chisq <- 
+    chisq.test(table(week24_CSTs_V0), simulate.p.value = TRUE)
+)
+
+week24_CSTs_V1 <- 
+  week24_CSTs |> 
+  filter(AVISITN == 1) |>  
+  select(subCST, ARM)
+
+(
+  V1_chisq <- 
+    chisq.test(table(week24_CSTs_V1), simulate.p.value = TRUE)
+)
+
+```
+No differences at baseline, but some differences post-MTZ, at randomization.
+
+
+
+

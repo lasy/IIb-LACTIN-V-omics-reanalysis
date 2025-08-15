@@ -1,0 +1,98 @@
+---
+title: "Demographic characteristics of participants"
+author: Laura Symul
+date: today
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+execute:
+  cache: true
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+# Demographics characteristics 
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(patchwork)
+library(gtsummary)
+
+theme_set(theme_light())
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+
+```
+
+
+```{r}
+
+mae <- load_latest_mae(str_c(data_dir(), "03_augmented_mae/"))
+clin <- MultiAssayExperiment::colData(mae) |> data.frame() |> as_tibble()
+
+```
+
+```{r}
+
+race_and_edu <- 
+  clin |> 
+  filter(ARM %in% c("LACTIN-V", "Placebo"), !is.na(EDULVL)) |> 
+  select(USUBJID, RACEGR1, RACEGR2, EDULVL) |> 
+  distinct() |> 
+  mutate(RACEGR2 = RACEGR2 |>  fct_relevel("Other", after = 1)) |> 
+  arrange(RACEGR2) |> 
+  mutate(RACEGR2 = RACEGR2 |> as.character() |> str_wrap(15) |> fct_inorder())
+
+
+(Xsq <- chisq.test(table(race_and_edu$EDULVL, race_and_edu$RACEGR2)))
+
+t_1 <- race_and_edu |> dplyr::count(RACEGR2, EDULVL) 
+
+g_1 <- 
+  ggplot(t_1, aes(x = RACEGR2, y = EDULVL, fill = RACEGR2)) +
+  geom_tile(aes(alpha = n)) +
+  geom_text(aes(label = n)) + 
+  # scale_alpha(range = c(0,1)) +
+  # scale_fill_gradient(low = "white", high = "steelblue") +
+  xlab("Self-declared participants' race") + ylab("") +
+  scale_fill_manual(values = c("purple1", "darkseagreen2", "gold3")) +
+  guides(fill = "none", alpha = "none")
+
+g_2 <- 
+  race_and_edu |> 
+  arrange(RACEGR2, RACEGR1) |>
+  mutate(RACEGR1 = RACEGR1 |> str_wrap(12) |> fct_inorder()) |> 
+  dplyr::count(RACEGR2, RACEGR1, EDULVL) |>
+  ggplot(aes(x = RACEGR1, y = EDULVL, fill = RACEGR2)) +
+  geom_tile(aes(alpha = n)) +
+  geom_text(aes(label = n)) + 
+  # scale_fill_gradient(low = "white", high = "steelblue") +
+  xlab("Self-declared participants' race (detailed)") + ylab("") +
+  scale_fill_manual(values = c("purple1", "darkseagreen2", "gold3")) +
+  guides(fill = "none", alpha = "none")
+
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 5
+
+g_1 + g_2 + plot_layout(guides = "collect", widths = c(4, 8))
+
+```
+
+

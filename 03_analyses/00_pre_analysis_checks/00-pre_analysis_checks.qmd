@@ -1,0 +1,52 @@
+---
+title: "Pre-analyses checks" 
+author: Laura Symul
+format: 
+   html:
+     page-layout: full
+     code-fold: true
+     toc: true
+     toc-location: left
+     toc-depth: 5
+     embed-resources: true
+execute:
+  cache: true  # true | refresh 
+knitr:
+  opts_chunk:
+    out.width: "100%"
+editor: source
+---
+
+```{r child = '001_visit_days.qmd'}
+
+```
+
+
+```{r child = '002_demographic_characteristics.qmd'}
+
+```
+
+
+```{r child = '003_balanced_arms_V0_V1.qmd'}
+
+```
+
+
+```{r child = '004_baseline_by_demographics.qmd'}
+
+```
+
+
+
+# Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>
+
+
+

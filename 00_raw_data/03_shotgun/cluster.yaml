@@ -1,0 +1,48 @@
+# The default resources
+__default__:
+    nodes: 1
+    cores: 1
+    partition: "short"
+    mem: 16GB
+    time: "12:00:00"
+    # hours:minutes:seconds
+
+filter_host_and_quality:
+  cores: "{threads}"
+  mem: 32GB
+
+prepare_bmc_reads:
+  mem: 32GB
+
+align_to_bacterial_db:
+  cores: "{threads}"
+  mem: 64GB
+
+breseq:
+  partition: "short"
+  cores: "{threads}"
+  mem: 16GB
+
+trimgalore:
+  cores: "{threads}"
+  mem: 32GB
+
+fastq_to_bam:
+  partition: "short"
+  cores: "{threads}"
+  mem: 16GB
+
+filter_host_and_quality:
+  partition: "short"
+  cores: "{threads}"
+  mem: 16GB
+
+sam_to_fastq_paired:
+  partition: "short"
+  cores: "{threads}"
+  mem: 16GB
+
+combine_sample_reads:
+  partition: "short"
+  cores: "{threads}"
+  mem: 4GB

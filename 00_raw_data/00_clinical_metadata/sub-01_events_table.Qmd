@@ -1,0 +1,1545 @@
+---
+title: "Events table"
+author: Laura Symul
+format: 
+  html:
+    code-fold: true
+execute:
+  cache: true
+project:
+  execute-dir: project
+---
+
+
+We start by collecting, in an `events` table, information related to various "events" that may happen during the study and be relevant for downstream analyses.
+
+We start with this table because we'll then add summaries of these events to the `subjects` and `visits` tables.
+
+So, in this section, we build the `events` table in *long format*, concatenating the information from the various database tables.
+
+The columns of the event tables are:
+
+```{r}
+
+events_variable_info <- 
+  bind_rows(
+    tibble(var = "USUBJID", label = "Participant ID", type = "character"),
+    tibble(var = "DAY", label = "Study day", type = "integer"),
+    tibble(var = "CATEGORY", label = "Event category", type = "factor"),
+    tibble(var = "VARIABLE", label = "Variable", type = "factor"),
+    tibble(var = "NUMBER", label = "Value", type = "integer"),
+    tibble(var = "VALUE", label = "Value", type = "character"),
+    tibble(var = "NOTE", label = "Note", type = "character"),
+  ) %>% 
+  mutate(
+    group = "Events"
+  )
+
+events_variable_info %>% 
+  knitr::kable()
+
+```
+
+```{r}
+
+variable_info <- 
+  variable_info %>% 
+  bind_rows(events_variable_info %>% filter(var != "USUBJID")) %>% 
+  distinct()
+
+```
+
+Where the possible categories (`CATEGORY`) of events are:
+
+```{r}
+
+events_factor_values <- 
+  tibble(
+    var = "CATEGORY", 
+    values = 
+      c("Doses", "Menstruation", "Sexual behavior", "Birth control", 
+        "Concomitant medication", "Symptoms"), 
+    colors = c("dodgerblue", "tomato", "hotpink","darkorchid",
+                   "slateblue","khaki3")
+  )
+
+
+events_factor_values %>% 
+  knitr::kable()
+
+```
+
+```{r}
+
+factor_values <- 
+  factor_values %>% 
+  bind_rows(events_factor_values) %>% 
+  distinct()
+
+```
+
+We build the global `events` table by concatenating smaller tables with events specific to each categories outlined above.
+
+## Timing of doses
+
+The data regarding the timing of doses is contained in the "Exposure as Collected" (`EC`) table.
+
+```{r}
+
+EC <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "EC.xlsx"), guess_max = 10000)
+
+# EC$ECSPID %>% unique()
+# EC$ECLNKID %>% unique()
+# EC$ECDOSFRM %>% unique()
+
+```
+
+For each participant, we have the relative study day at which they self-administered a dose of product or placebo (checked by applicator staining).
+
+```{r}
+
+EC <- 
+  EC |>
+  mutate(
+    ECLNKID = ECLNKID %>% factor(., levels = stringr::str_c("Week ", 1:11)),
+    `Dose # in week` = ECSPID |> str_remove("Dose ") |> as.integer(),
+    DAY = `Study Day of Start of Treatment` |> as.integer()
+  ) |> 
+  group_by(USUBJID) |> 
+  mutate(N_doses = length(unique(DAY))) |> 
+  ungroup() |> 
+  arrange(N_doses) |> 
+  mutate(USUBJID = USUBJID |> factor(levels = unique(USUBJID)))
+
+```
+
+
+```{r}
+
+#| fig-width: 10
+#| fig-height: 8
+
+EC |> 
+  filter(
+    # USUBJID %in% selected_participants,
+    !is.na(DAY)
+         ) |> 
+  ggplot(aes(x = DAY, y = USUBJID, col = ECLNKID)) +
+  geom_point(size = 0.75) +
+  # geom_text(aes(label = `Dose # in week`)) +
+  # facet_grid(USUBJID ~ ., scales = "free", space = "free_x") +
+  ylab("") +
+  scale_y_discrete("Participant (ordered by overall adherence)", breaks = NULL) +
+  scale_x_continuous("Relative study day", breaks = seq(0, 500, by = 14),
+                     minor_breaks = seq(0, 500, by = 1), limits = c(0, max(EC$DAY)+1)) +
+  expand_limits(add = c(0,0)) +
+  scale_color_viridis("", discrete = TRUE, option = "A", begin = 0.15, end = 0.85)
+
+```
+
+We note that the day of the very first dose is not provided in the database, because, by design, participants have received their first dose at their first visit (on day 1).
+However, there are a few participants who also took their second dose on day 1.
+
+
+Because the time since last dose at last visit is an important parameters, we check that there are no protocol deviation related to a dose taken just before a visit.
+
+The list of protocol deviations is in the `DV` table and those related to "doses" are:
+
+```{r}
+
+DV <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "DV.xlsx"), guess_max = 10000)
+
+DV %>% 
+  filter(str_detect(DVTERM, "DOSE")) %>% 
+  select(DVDECOD, DVTERM) %>% 
+  count(DVDECOD, DVTERM) %>% 
+  arrange(DVDECOD) %>% 
+  knitr::kable()
+
+```
+
+It looks like there are no such protocol deviation.
+
+So, we build the `doses_events` table from the `EC` table:
+
+```{r}
+
+doses_events <- 
+  EC %>% 
+  filter(ECOCCUR == "Y") %>% 
+  select(USUBJID, DAY, ECLNKID, ECSPID) %>% 
+  rename(NUMBER = ECSPID) %>% 
+  mutate(
+    DAY = DAY |>  as.integer(),
+    CATEGORY = "Doses" |> factor(levels = get_fct_values("CATEGORY")),
+    VARIABLE = "Dose",
+    NUMBER = NUMBER |>  str_remove("Dose ") |>  as.integer(),
+    VALUE = NA_character_,
+    NOTE = NA_character_
+  ) %>% 
+  arrange(USUBJID, DAY) |>
+  select(all_of(events_variable_info$var))
+
+# We add the first doses on day 1
+
+doses_events <- 
+  doses_events %>% 
+  bind_rows(
+    doses_events %>% 
+      select(USUBJID, CATEGORY, VARIABLE) %>% 
+      distinct() %>% 
+      mutate(DAY = 1, NUMBER = 1)
+  ) %>%  arrange(USUBJID, DAY) 
+
+
+# And we duplicate to add the dose number since study start
+
+# doses_events <- 
+#   doses_events %>% 
+#   bind_rows(
+#     ., 
+#     doses_events %>% 
+#       group_by(USUBJID) %>% 
+#       mutate(VARIABLE = "Dose # since study start",
+#              VALUE = row_number()
+#       ) %>% 
+#       ungroup()
+#   ) %>%  arrange(USUBJID, DAY) 
+
+```
+
+
+
+## Menstruation
+
+Menstruation data is contained in the `FA` table.
+
+```{r}
+
+FA <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "FA.xlsx"), guess_max = 10000)
+
+```
+
+For the last 12 weeks, questionnaires were filled weekly, and not daily. 
+
+We first collect the data for the first 12 weeks.
+
+```{r}
+
+menstruation_events_w1_w12 <- 
+  FA %>% 
+  mutate(
+    FASPID = FASPID %>% as.numeric(),
+    FADY = FADY %>% as.numeric()
+  ) %>% 
+  filter(
+    FATEST == "MENSTRUATING",
+    FASTRESC == "Y" ,
+    FASPID <= 11
+  ) %>% 
+  select(
+    USUBJID, FADY
+  ) %>% 
+  rename(DAY = FADY) %>% 
+  mutate(
+    CATEGORY = "Menstruation",
+    VARIABLE = "Menstruation",
+    NUMBER = NA_integer_,
+    VALUE = NA_character_,
+    NOTE = "daily"
+  ) %>% 
+  select(all_of(events_variable_info$var))
+
+```
+
+
+```{r}
+#| fig-height: 7
+
+menstruation_events_w1_w12 |> 
+  arrange(DAY) |> 
+  mutate(USUBJID = USUBJID |> factor(levels = unique(USUBJID))) |> 
+  ggplot(aes(x = DAY, y = USUBJID |> fct_rev())) +
+  geom_point(col = "tomato", size = 0.75) +
+  scale_y_discrete("Participants (ordered by start of first menses)", breaks = NULL) +
+  scale_x_continuous(breaks = seq(0, 500, by = 14), minor_breaks = 0:500)
+  
+```
+
+
+We then collect the data from week 12 and on. 
+
+```{r}
+
+menstruation_events_w12_24 <-  
+   FA %>% 
+  mutate(
+    FASPID = FASPID %>% as.numeric(),
+    FADY = FADY %>% as.numeric()
+  ) %>% 
+  filter(
+    FATEST == "MENSTRUATING",
+    FASTRESC == "Y" ,
+    FASPID > 11
+  ) %>% 
+  select(
+    USUBJID, FADY
+  ) %>% 
+  rename(DAY = FADY) %>% 
+  mutate(
+    CATEGORY = "Menstruation",
+    VARIABLE = "Menstruation",
+    NUMBER = NA_integer_,
+    VALUE = NA_character_,
+    NOTE = "weekly"
+  ) %>% 
+  select(all_of(events_variable_info$var))
+
+
+```
+
+
+
+```{r}
+#| fig-height: 7
+
+menstruation_events_w12_24 |> 
+  arrange(DAY) |> 
+  mutate(USUBJID = USUBJID |> factor(levels = unique(USUBJID))) |> 
+  ggplot(aes(x = DAY, y = USUBJID |> fct_rev())) +
+  geom_point(col = "tomato", size = 0.75) +
+  scale_y_discrete("Participants (ordered by start of first menses from W12)",
+                   breaks = NULL) +
+  scale_x_continuous(breaks = seq(0, 500, by = 14), minor_breaks = 0:500)
+  
+```
+
+```{r}
+
+menstruation_events <- 
+  bind_rows(
+    menstruation_events_w1_w12, 
+    menstruation_events_w12_24
+  )
+
+```
+
+
+
+## Sexual behavior
+
+Sexual activity data is collected daily during the treatment, then weekly after the treatment is over. 
+
+![](images/sex_daily.png)
+
+![](images/sex_weekly.png)
+
+
+As we see on the annotated CRFs, sexual activity data is contained in two tables: the `ER` and the `SUPPER` tables. Information about the relative dates is contained in the `FA` table.
+
+
+The `ER` table says whether participant had vaginal intercourse, while the `SUPPER` tables document whether participants used condoms or not (+ provides the sexual frequency from week 12).
+There should be redundancy between information in the `ER` and `SUPPER` tables, as `CONDMUSE` in `SUPPER` should only be `Yes` or `No` if `ERCAT` in `ER` is `SEXUAL ACTIVITY`. We will check that.
+
+To form the `sex_events` table, we first create a `sex_events_w1_w11` table that contains the daily sexual activity data for the first 11 weeks. Then, we create a `sex_events_w12_24` table that contains the weekly sexual activity data from week 12. We then concatenate these two tables.
+
+
+### First 11 weeks
+
+To create the `sex_events_w1_w11`, we proceed as follow:
+
+- We filter the `ER` table to keep sex data from the first 11 weeks
+- We add the relative dates to the `ER` table from the `FA` table
+- We filter the `SUPPER` table to keep the condom use data from the first 11 weeks
+- We add the relative dates to the `SUPPER` table from the FA table
+- We join the augmented `ER` and `SUPPER` tables and check that for each entry in the `SUPPER` table, we had a "Y" in the `ER` table.
+
+
+![](images/sex_daily.png)
+
+
+#### `ER` table
+
+```{r}
+
+ER <- readxl::read_xlsx(str_c(SDTM_dir, "ER.xlsx"), guess_max = 10000)
+
+```
+
+
+Sexual activity data contained in the `ER` table can be found for column `ERCAT = "SEXUAL ACTIVITY"`). 
+
+```{r}
+
+ER_sex_w1_w24 <- 
+  ER |> 
+  filter(
+    ERCAT == "SEXUAL ACTIVITY", 
+    EROCCUR == "Y"
+    )
+
+```
+
+
+However, the relative dates are missing for this category: 
+
+```{r}
+#| code-fold: true
+
+ER_sex_w1_w24 |> 
+  select(ERDTC, `Visit Number`, VISIT, VISITDY, EPOCH, ERDY) |> 
+  distinct()
+
+```
+
+```{r}
+
+ER_sex_w1_w24 <-  
+  ER_sex_w1_w24 |> 
+  select(USUBJID, ERGRPID, ERREFID, ERCAT, EROCCUR) 
+    
+```
+
+
+The two columns that likely provide the relative dates for sexual activity are the `ERGRPID` and the `ERREFID`, assuming that the suffix of `ERREFID` provides the day of week for the first 11 weeks, then the week from week 12.
+
+```{r}
+
+ER_sex_w1_w24 <-  
+  ER_sex_w1_w24 |> 
+  mutate(
+    suffix = ERREFID |> str_remove(ERGRPID) |> 
+      str_remove("\\.SEXVAG"),
+    prefix = ERREFID |> str_remove("\\..*")
+  )
+
+cat("suffixes : ",ER_sex_w1_w24$suffix |> unique() |> sort(),"\n")
+cat("prefix : ",ER_sex_w1_w24$prefix |> unique() |> sort(), "\n")
+
+```
+
+
+In the `FA` table, there is one column that has matching values with the `ERGRPID` column: the `FAGRPID`. 
+
+We note that we do not need the `FAREFID` columns because the suffixes of these do not match those of the `ER$ERREFID` column and we can retrieve the day/week from the `suffix` column we just created. 
+
+```{r}
+
+FA_ZRS <- 
+  FA |> 
+  filter(str_detect(FAGRPID, "ZRS")) |> 
+  select(USUBJID, FAGRPID, FASPID, FADY) |>
+  mutate(
+    # FASPID is the week at which the CRFs were filled
+    FASPID = FASPID |> as.integer(),
+    FADY = FADY |> as.integer()
+  ) |> 
+  group_by(USUBJID, FAGRPID, FASPID) |> 
+  # we only need to keep the first day of the week
+  summarize(first_day_of_week = min(FADY), .groups = "drop") |> 
+  distinct()
+
+```
+
+We can now join this simplified `FA` table to the `ER` table:
+
+```{r}
+
+ER_sex_w1_w24_with_FA <- 
+  ER_sex_w1_w24 |> 
+  left_join(
+    FA_ZRS, 
+    by = c("USUBJID", "ERGRPID" = "FAGRPID")
+    ) 
+  
+```
+
+
+```{r}
+
+ER_sex_w1_w24_with_dates <- 
+  ER_sex_w1_w24_with_FA |> 
+  mutate(
+    suffix_int = match(suffix, LETTERS),
+    week = 
+      case_when(
+        FASPID < 12 ~ FASPID,
+        TRUE ~ FASPID + suffix_int - 1
+      ),
+    DAY = 
+      case_when(
+        FASPID < 12 ~ first_day_of_week + suffix_int - 1,
+        TRUE ~ first_day_of_week + 7 * (suffix_int - 1)
+      )
+    )
+
+```
+
+
+```{r}
+
+ER_sex_w1_w11 <- 
+  ER_sex_w1_w24_with_dates |> 
+  filter(week < 12)
+  
+
+```
+
+
+With this done, we can now retrieve the condom use data from the `SUPPER` table for the first 11 weeks.
+
+
+
+
+#### `SUPPER` table
+
+The `SUPPER` table contains information on sex frequency from week 12 and on condom use throughout the study.
+
+```{r}
+
+# SUPPER contains condom use and sexual frequency from week 12
+
+SUPPER <- readxl::read_xlsx(str_c(SDTM_dir, "SUPPER.xlsx"), guess_max = 10000)
+
+```
+
+Condom use for the first 11 weeks is found in the `SUPPER` table for column `QNAM == "CNDMUSE"`.
+
+```{r}
+
+SUPPER |> 
+  count(QNAM, QLABEL) |> 
+  knitr::kable(caption = "Variables contained in the SUPPER table.")
+
+```
+
+
+```{r}
+
+SUPPER_w1_w24 <- 
+  SUPPER %>% 
+  filter(QNAM == "CNDMUSE", QVAL %in% c("Y","N"))
+
+```
+
+Similarly to the `ER` table, the relative dates are missing in the `SUPPER` table.
+
+```{r}
+
+SUPPER_w1_w24 |> head() |> knitr::kable(caption = "First 6 rows of the SUPPER table.")
+
+```
+
+
+The `IDVARVAL` column has a similar format to the `ERREFID` from the `ER` table, but there are 2 prefixes (only one in the `ER` table)
+
+```{r}
+
+SUPPER_w1_w24 <- 
+  SUPPER_w1_w24 |> 
+  mutate(prefix = str_remove(IDVARVAL, "\\..*"))
+
+SUPPER_w1_w24$prefix |> unique()
+
+```
+
+The `"GSH"` prefix corresponds to the entries from a different CRF (the "Gynecological and Sexual History") and not to the daily/weekly logs.
+
+Consequently, we can ignore these entries.
+
+```{r}
+
+SUPPER_w1_w24 <- 
+  SUPPER_w1_w24 |> 
+  filter(prefix == "ZRS")
+
+```
+
+
+We note that the number of rows from `ER_sex_w1_w24_with_dates` has the same number of rows than `SUPPER_w1_w24` and that the ERREFID and IDVARVAL columns have the same values.
+
+```{r}
+
+nrow(ER_sex_w1_w24_with_dates) == nrow(SUPPER_w1_w24)
+
+all(ER_sex_w1_w24_with_dates$ERREFID %in% SUPPER_w1_w24$IDVARVAL)
+
+```
+
+
+So we can now add the dates to the `SUPPER_w1_w24` from the `ER_sex_w1_w24_with_dates` table.
+
+```{r}
+ 
+SUPPER_w1_w24_with_dates <- 
+  SUPPER_w1_w24 |> 
+  mutate(ERREFID = IDVARVAL) |> 
+  left_join(
+    ER_sex_w1_w24_with_dates |> select(ERREFID, week, DAY),
+    by = join_by(ERREFID)
+    )
+
+```
+
+
+And we can filter for the week 1 to 11:
+
+```{r}
+
+SUPPER_w1_w11 <- 
+  SUPPER_w1_w24_with_dates |> 
+  filter(week < 12)
+  
+```
+
+#### Creating the `sex_event_w1_w11` table
+
+Since the `ER` table only contains whether participants reported sex on a given day, we don't really need it as the `SUPPER` table contains the same information along with the condom us. So we create the `sex_event_w1_w11` table from the `SUPPER` table.
+
+
+```{r}
+ 
+sex_event_w1_w11 <- 
+  SUPPER_w1_w11 |> 
+  select(USUBJID, DAY, QVAL) |>
+  mutate(
+    CATEGORY = "Sexual behavior",
+    VARIABLE = ifelse(QVAL == "Y", "Sex with condoms","Sex without condoms"),
+    NUMBER = 1,
+    VALUE = NA_character_,
+    NOTE = "Daily logs"
+  ) |> 
+  select(-QVAL) |> 
+  arrange(USUBJID, DAY)
+
+head(sex_event_w1_w11) |> knitr::kable(caption = "First 6 rows of the `sex_event_w1_w11` table.")
+
+```
+
+
+
+
+### From week 12
+
+From week 12, sexual behavior is collected weekly (instead of daily) 
+and the survey questions are slightly different.
+
+![](images/sex_weekly.png)
+
+
+For the `sex_event_w12_w24`, we mostly use the `SUPPER` table as it has the sexual frequency and whether participants used condoms.
+
+The weekly logs are found for the `QNAM == "SEXVGFRQ"` and `QNAM == "CNDMFRQ"`.
+
+```{r}
+
+SUPPER |> 
+  count(QNAM, QLABEL)
+
+```
+
+
+```{r}
+
+SUPPER_weekly <- 
+  SUPPER %>% 
+  filter(QNAM %in% c("SEXVGFRQ", "CNDMFRQ"))
+
+SUPPER_weekly |> head() |> knitr::kable(caption = "First 6 rows of the `SUPPER` table for weekly variables.")
+
+```
+
+We see that the `IDVARVAL` still matches the same format as the `ERREFID` from the `ER` table and that the prefix matches that of the `ER` table.
+
+```{r}
+
+SUPPER_weekly <- 
+  SUPPER_weekly |> 
+  mutate(prefix = IDVARVAL |> str_remove("\\..*"))
+
+SUPPER_weekly$prefix |> unique()
+
+```
+
+So, we join with the `ER_sex_w1_w24_with_dates` table to retrieve the dates.
+
+```{r}
+
+SUPPER_weekly_with_dates <- 
+  SUPPER_weekly |> 
+  mutate(ERREFID = IDVARVAL) |>
+  left_join(
+    ER_sex_w1_w24_with_dates |> select(USUBJID, ERREFID, week, DAY),
+    by = join_by(USUBJID, ERREFID)
+  )
+
+```
+
+And check that we have a relative date for each `SUPPER_weekly` entry
+
+```{r}
+
+all(!is.na(SUPPER_weekly_with_dates$DAY))
+
+```
+
+Now, we need to wrangle this table to format it as the `sex_event_w1_w11` table.
+
+At the moment, the table is still in long format with the sexual frequency and condom use values in the same column:
+
+```{r}
+
+SUPPER_weekly_with_dates |> 
+  count(QNAM, QVAL)
+
+```
+
+So, we need to `pivot_wider` to have the sexual frequency and condom use in separate columns:    
+    
+```{r}
+
+SUPPER_weekly_wide <- 
+  SUPPER_weekly_with_dates |> 
+  select(USUBJID, DAY, QNAM, QVAL) |>
+  pivot_wider(
+    id_cols = c(USUBJID, DAY),
+    names_from = QNAM, 
+    values_from = QVAL
+  )
+
+```
+
+We note that the answer "No" to the condom use question was not coded: it is the value by default, so we replace `NA`s by "No"
+    
+```{r}
+
+SUPPER_weekly_wide <- 
+  SUPPER_weekly_wide |> 
+  mutate(
+    SEXVGFRQ = SEXVGFRQ |> as.integer(),
+    CNDMFRQ = CNDMFRQ |> replace_na("No")
+)
+
+```
+
+From this table, we can now create two additional columns: one that counts the number of days where participants had sex with condoms and one for the days where they had sex without condoms.
+
+We also arbitrarily decide that if participants answered "Sometimes" or "Unknown" to the condom use question, they used it on half of the days (rounded up). 
+
+```{r}
+
+SUPPER_weekly_wide <- 
+  SUPPER_weekly_wide |> 
+  mutate(
+    `Sex with condoms` = 
+      case_when(
+        CNDMFRQ == "No" ~ 0,
+        CNDMFRQ %in% c("Sometimes","Unknown") ~ ceiling(SEXVGFRQ / 2),
+        TRUE ~ SEXVGFRQ
+      ),
+    `Sex without condoms` = SEXVGFRQ - `Sex with condoms`
+      )
+
+SUPPER_weekly_wide |> 
+  head() |> 
+  knitr::kable(caption = "First 6 rows of the weekly data in wide format")
+
+```
+
+
+From this, we can create the `sex_event_w12_w24` by pivoting "longer" the two columns we just created and arbitrarily deciding that participants have sex on consecutive days from the start of the week.
+
+
+```{r}
+
+sex_event_w12_w24 <- 
+  SUPPER_weekly_wide |> 
+  select(USUBJID, DAY, `Sex with condoms`, `Sex without condoms`) |>
+  pivot_longer(
+    cols = c(`Sex with condoms`, `Sex without condoms`),
+    names_to = "VARIABLE",
+    values_to = "NUMBER"
+  ) |> 
+  filter(NUMBER > 0) |>
+  mutate(
+    CATEGORY = "Sexual behavior",
+    VALUE = NA_character_,
+    NOTE = "Weekly logs"
+  ) |> 
+  select(USUBJID, DAY, CATEGORY, VARIABLE, NUMBER, VALUE, NOTE) |> 
+  arrange(USUBJID, DAY, VARIABLE)
+
+
+sex_event_w12_w24 <- 
+  sex_event_w12_w24[rep(1:nrow(sex_event_w12_w24), sex_event_w12_w24$NUMBER),] |> 
+  group_by(USUBJID, DAY) |> 
+  mutate(
+    DAY = DAY + row_number() - 1,
+    NUMBER = 1,
+  )  |> 
+  ungroup()
+
+sex_event_w12_w24 |> 
+  head() |>
+  knitr::kable(caption = "First 6 rows of the `sex_event_w12_w24` table")
+
+
+```
+
+### All sex events
+
+
+These two tables can now be concatenated:
+
+```{r}
+
+sex_events <- 
+  bind_rows(sex_event_w1_w11, sex_event_w12_w24) |> 
+  mutate(NUMBER = NA_real_)
+
+```
+
+and visualized
+
+```{r}
+#| fig-height: 7
+
+sex_events |> 
+  group_by(USUBJID) |> 
+  mutate(
+    tot_sex = n(), 
+    sex_rank = sum(VARIABLE == "Sex without condoms") - sum(VARIABLE == "Sex with condoms")
+    ) |> 
+  ungroup() |> 
+  arrange(sex_rank) |> 
+  mutate(USUBJID = USUBJID |> factor(level = unique(USUBJID))) |> 
+  ggplot(
+    aes(x = DAY, y = USUBJID, col = VARIABLE)
+  ) +
+  geom_point(size = 0.5) +
+  scale_y_discrete(
+    "Participants\n(ordered by total number of days with vaginal sex)",
+    breaks = NULL
+    ) +
+  scale_x_continuous(
+    "Relative Study Day", 
+    breaks = seq(0, 500, by = 14), minor_breaks = 0:500
+    ) +
+  scale_color_manual(values = c("steelblue2", "pink2"))
+
+```
+
+
+## Birth control
+
+Birth control information is contained within two different tables.
+
+1. The `RP` table contains the data from the "BC1" (Birth Control) CRF.
+
+2. The `CM` table contains data from the "CM1" (Concomittant Medication) CRF.
+
+To create a unified *Birth Control / Hormonal Therapy* table, we proceed as follow:
+
+1. We retrieve the Birth control information from the `RP` (BC1) table
+
+2. We retrieve all *Birth Control / Hormonal Therapy* information from the CM table by filtering on the indication (birth control, contraception, ovarian insufficiency, etc.) of the medication. We add to this table a column (`VALUE`) that provides the birth control category of the medication (so to match the categories defined in the BC1 CRF)
+
+3. We do a full join of these two tables by `USUBJID`, `DAY`, and `VALUE` and augment this table with a `BC_TYPE` column that specifies if the birth control is non-hormonal, uses a combination of E and P, or is a P-only birth control/hormonal therapy.
+
+4. We clean-up the table in case the start and end dates of the birth control specified in the `BC` or in the `CM` tables don't match.
+
+### BC1 CRF data
+
+```{r}
+
+RP <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "RP.xlsx"), guess_max = 10000)
+# SUPPRP <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "SUPPRP.xlsx"), guess_max = 10000)
+
+BC_RP <- 
+  RP %>% 
+  filter(RPTESTCD == "BCMETHOD") %>% 
+  select(USUBJID, RPTESTCD, RPORRES, RPSTDTC, RPENDTC, RPSTDY, RPENDY) %>% 
+  mutate(
+    start_date = RPSTDTC %>% autofill_date(),
+    end_date = RPENDTC %>% autofill_date()
+  ) %>% 
+  left_join(
+    ADSL |> 
+      select(USUBJID, TRTSDT, EOSDT) |> 
+      mutate(
+        TRTSDT = TRTSDT |> as.Date(format = "%d%b%Y"),
+        EOSDT = EOSDT |> as.Date(format = "%d%b%Y")
+      ),
+    by = "USUBJID") |> 
+  mutate(
+    end_date = pmin(end_date, EOSDT, na.rm = TRUE),
+    start_day = (start_date - TRTSDT) %>% as.integer(units = "days"),
+    start_day = ifelse(start_day > 0, start_day + 1, start_day),
+    start_day = pmax(start_day, -30),
+    start_day = ifelse(is.na(start_day), -30, start_day),
+    end_day = (end_date - TRTSDT) %>% as.integer(units = "days"),
+    end_day = ifelse(end_day > 0, end_day + 1, end_day),
+    end_day = pmax(end_day, start_day),
+    duration = end_day - start_day + 1,
+    id = row_number()
+  ) 
+
+# expand such that each day within start and end day has an input
+BC_RP_events <- 
+  BC_RP[rep(1:nrow(BC_RP), BC_RP$duration),] %>% 
+  group_by(id) %>% 
+  mutate(DAY = start_day + row_number() - 1) %>% 
+  ungroup() %>% 
+  filter(DAY != 0) %>% 
+  mutate(
+    VALUE = RPORRES
+  ) %>% 
+  select(USUBJID, DAY, VALUE)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 10
+
+# ggplot(BC_RP_events %>% 
+#          left_join(subjects %>% select(USUBJID, EOSSTT), by = "USUBJID") %>% 
+#          filter(EOSSTT == "COMPLETED"), 
+#        aes(x = DAY, y = USUBJID, fill = VALUE)) +
+#   geom_tile(width = 1, alpha = 0.5) 
+
+ggplot(BC_RP_events, aes(x = DAY, y = USUBJID, fill = VALUE)) +
+  geom_tile(width = 1, alpha = 0.5) +
+  theme(axis.text.y = element_text(size = 2))
+
+```
+
+### Birth control from the concomitant medication table
+
+
+Birth control from the concomitant medication table: 
+
+```{r}
+
+CM <- readxl::read_xlsx(stringr::str_c(SDTM_dir, "CM.xlsx"), guess_max = 10000)
+
+BC_indications <- 
+  c(
+    "BROKEN CONDOM DURING SEX", 
+    "CONTRACEPTION", 
+    "ORAL CONTRACEPTION", 
+    "ORAL CONTRACEPTIVE", 
+    "POST COITAL CONTRACEPTION", 
+    "PREGNANCY PREVENTION", 
+    "PREMENSTRUAL SYNDROME", 
+    "PRIMARY OVARIAN INSUFFICIENCY",
+    "BIRTH CONTROL"
+  )
+
+# for some pills, we need to use the CM table to figure out whether they are combined or P only
+BC_CM <- 
+  CM |> 
+  filter(CMINDC %in% BC_indications) |> 
+  select(USUBJID, CMINDC, CMTRT, CMSTDTC, CMENDTC, CMSTDY, CMENDY, CMENRF) |>  
+  mutate(
+    start_date = CMSTDTC %>% autofill_date(),
+    end_date = CMENDTC %>% autofill_date()
+  ) |> 
+  left_join(
+    ADSL |> 
+      select(USUBJID, TRTSDT, EOSDT) |> 
+      mutate(
+        TRTSDT = TRTSDT |> as.Date(format = "%d%b%Y"),
+        EOSDT = EOSDT |> as.Date(format = "%d%b%Y")
+      ),
+      by = "USUBJID") |>  
+  mutate(
+    end_date = pmin(end_date, EOSDT, na.rm = TRUE),
+    start_day = (start_date - TRTSDT) |>  as.integer(units = "days"),
+    start_day = ifelse(start_day > 0, start_day + 1, start_day),
+    start_day = pmax(start_day, -30),
+    start_day = ifelse(is.na(start_day), -30, start_day),
+    end_day = (end_date - TRTSDT) |>  as.integer(units = "days"),
+    end_day = ifelse(end_day > 0, end_day + 1, end_day),
+    duration = end_day - start_day + 1,
+    id = row_number()
+  ) 
+
+BC_CM_events <- 
+  BC_CM[rep(1:nrow(BC_CM), BC_CM$duration),] %>% 
+  group_by(id) %>% 
+  mutate(DAY = start_day + row_number() - 1) %>% 
+  ungroup() %>% 
+  filter(DAY != 0) %>% 
+  mutate(
+    NOTE = CMTRT
+  ) %>% 
+  select(USUBJID, DAY, NOTE)
+
+# BC categories - dictionary
+
+BC_dict <- 
+  BC_CM %>% select(CMINDC, CMTRT) %>% distinct() %>% 
+  mutate(
+    VALUE = 
+      case_when(
+        CMTRT %in% c("DEPO PROVERA INJECTION", "DEPO PROVERA", "DEPOPROVERA") ~ 
+          "HORMONAL INJECTIONS",
+        CMTRT %in% c("NEXPLANON", "IMPLANON", "NORPLANT") ~ 
+          "HORMONAL IMPLANTS",
+        CMTRT %in% c("MIRENA IUD","MIRENA","IUD", "INTRA UTERINE DEVICE", "LILETTA") ~
+          "INTRAUTERINE DEVICE, HORMONAL",
+        CMTRT %in% c("PARAGARD") ~ 
+          "INTRAUTERINE DEVICE, NON-HORMONAL",
+        CMTRT %in% c("ORAL CONTRACEPTIVE", "MICROGESTIN FE", "LUTERA", "APRI", "CHATEAL", "LOESTRIN FE", "NORETHINDRONE PROGESTIN ETHINYL ESTRADIOL ESTROGEN", "NATAZIA", "ORTHO TRI CYCLEN","ORTHO TRI CYCLEN LO", "LYZA","AVIANE", "PORTIA", "CAMILA","YASMIN","MONONESSA","AUBRA", "TRI LO SPRINTEC") ~ 
+          "ORAL CONTRACEPTIVES",
+        CMTRT %in% c("CONTRACEPTIVE PATCH","ORTHO EVRA") ~ 
+          "CONTRACEPTIVE PATCHES",
+        CMTRT %in% c("LEVONORGESTREL", "PLAN B ONE STEP", "PLAN B") ~ "EMERGENCY CONTRACEPTION",
+        CMTRT %in% c("ESTRADIOL", "MEDROXYPROGESTERONE") ~ "HORMONAL THERAPY",
+        TRUE ~ "??????"
+      )
+  )
+
+
+BC_CM_events <-  
+  BC_CM_events %>% 
+  left_join(
+    BC_dict %>% select(-CMINDC) %>% rename(NOTE = CMTRT) %>% distinct(), 
+    by = "NOTE"
+  )
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 11
+
+ggplot(BC_CM_events, aes(x = DAY, y = NOTE , fill = VALUE)) +
+  geom_tile(alpha = 0.5) +
+  facet_grid(USUBJID ~ ., scales = "free") +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0))
+
+```
+
+
+### Joining the two tables
+
+We now join the two tables
+
+```{r}
+
+BC_events <- 
+  full_join(
+    BC_RP_events,
+    BC_CM_events, 
+    by = c("USUBJID", "DAY", "VALUE")
+    ) %>% 
+  mutate(CATEGORY = "Birth control")
+
+```
+
+### Clean-up
+
+And check for conflicting information:
+
+
+```{r}
+
+potential_BC_conflict <- 
+  BC_events %>% 
+  group_by(USUBJID, DAY) |> 
+  summarize(
+    VALUE = str_c(VALUE |> sort() |> unique(), collapse = " | "), 
+    .groups = "drop"
+  ) |> 
+  filter(str_detect(VALUE, "\\|")) |> 
+  select(USUBJID, VALUE) |> 
+  distinct()
+
+# Having examine those cases, we can see that the only potential conflict is between
+# hormonal and non-hormonal IUDs
+
+potential_BC_conflict |> 
+  filter(
+    str_detect(VALUE, "INTRAUTERINE DEVICE, HORMONAL") & 
+      str_detect(VALUE, "INTRAUTERINE DEVICE, NON-HORMONAL")
+  )
+```
+
+These participants have conflicting information about the type of IUD they are using. 
+So we examine these manually.
+
+
+
+```{r}
+#| fig-height: 2.5
+
+# STI.00363
+BC_events |> 
+  filter(USUBJID == "STI.00363") |> 
+  ggplot(aes(x = DAY, y = VALUE)) +
+  geom_point() +
+  ggtitle("STI.00363")
+
+```
+
+For this participant, we see that there is only a conflict at the very beginning, these probably relate to past contraceptive use. They won't be an issue for our downstream analyses.
+
+```{r}
+#| fig-height: 2.5
+
+# STI.00446
+BC_events |> 
+  filter(USUBJID == "STI.00446") |> 
+  ggplot(aes(x = DAY, y = VALUE, col = NOTE)) +
+  geom_point() +
+  ggtitle("STI.00446")
+
+```
+
+For this participant, since "Paraguard" is explicitly mentioned in the concomitant medication table, I assume that the BC1 CRF was filled incorrectly.
+
+We can thus remove the hormonal IUD from the `BC_events` table for this participant.
+
+```{r}
+
+BC_events <- 
+  BC_events |> 
+  filter(!(USUBJID == "STI.00446" & VALUE == "INTRAUTERINE DEVICE, HORMONAL"))
+
+```
+
+
+```{r}
+#| fig-height: 2.5
+
+# STI.00570
+BC_events |> 
+  filter(USUBJID == "STI.00570") |> 
+  ggplot(aes(x = DAY, y = VALUE, col = NOTE)) +
+  geom_point() +
+  ggtitle("STI.00570")
+
+```
+
+The situation for this participant is similar to the situation for the previous participant, except that they likely have a hormonal IUD. So we manually remove the "non-hormonal" entries coming from the BC1 table.
+
+```{r}
+
+BC_events <- 
+  BC_events |> 
+  filter(!(USUBJID == "STI.00570" & VALUE == "INTRAUTERINE DEVICE, NON-HORMONAL"))
+
+```
+
+
+
+### Defining broader BC category
+
+Now that our `BC_events` table is clean, we define the BC category that we store in the `VARIABLE` column.
+
+
+```{r}
+
+combined_BC <- 
+  c("HORMONAL INJECTIONS", "HORMONAL THERAPY", "ORAL CONTRACEPTIVES", 
+    "NUVARING", "CONTRACEPTIVE PATCHES")
+  
+P_BC <- c("INTRAUTERINE DEVICE, HORMONAL", "HORMONAL IMPLANTS", "EMERGENCY CONTRACEPTION")
+
+BC_events <- 
+  BC_events %>% 
+  mutate(
+    VARIABLE = 
+      case_when(
+        VALUE == "INTRAUTERINE DEVICE, HORMONAL" ~ "IUD (Hormonal)",
+        VALUE == "INTRAUTERINE DEVICE, NON-HORMONAL" ~ "IUD (Non-hormonal)",
+        (VALUE %in% combined_BC) & !(NOTE %in% c("LYZA", "CAMILA")) ~ "Combined",
+        (VALUE %in% P_BC) | (NOTE %in% c("LYZA", "CAMILA")) ~ "P only",
+        TRUE ~ "Non-hormonal"
+      ),
+    NUMBER = NA_integer_
+  ) %>% 
+  select(USUBJID, DAY, CATEGORY, VARIABLE, NUMBER, VALUE, NOTE)
+
+```
+
+
+The categories are:
+
+```{r}
+
+BC_events |> 
+  group_by(VARIABLE, VALUE) |> 
+  summarize(n_participants = length(unique(USUBJID)), .groups = "drop") |> 
+  knitr::kable()
+
+```
+We note that the sum of participants is larger than the total number of participants because it's not uncommon to combine several methods of birth control.
+
+
+```{r}
+
+# participants_with_IUD_NH <- 
+#   BC_RP %>%
+#   left_join(., ADSL %>% select(USUBJID, SUBJID, SITENAME), by = "USUBJID") %>% 
+#   filter(RPORRES == "INTRAUTERINE DEVICE, NON-HORMONAL") %>%
+#   mutate(years_since_start =
+#            (TRTSDT - start_date) %>%
+#            as.numeric(., units = "weeks") %>%
+#            divide_by(52) %>%
+#            round(., 2)) %>%
+#   select(USUBJID, SUBJID, SITENAME, everything()) %>%
+#   arrange(SITENAME)
+# 
+# # BC_CM %>% filter(USUBJID %in% participants_with_IUD_NH$USUBJID)
+# 
+# participants_with_IUD_NH %>% 
+#   write_csv("../../Notes & working documents/BC1_NH_IUD.csv")
+# 
+# 
+# BC_RP %>% 
+#   filter(USUBJID == "STI.00446")
+# 
+# 
+# full_join(
+#   BC_events %>%
+#     select(VALUE, NOTE, VARIABLE) %>%
+#     distinct() %>%
+#     arrange(VALUE) %>%
+#     rename(CMTRT = NOTE, BC_TYPE = VALUE, BC_CAT = VARIABLE),
+#   BC_dict %>%
+#     rename(BC_TYPE = VALUE),
+#   by = c("BC_TYPE", "CMTRT")
+# ) %>% 
+#   mutate(CMTRT = CMTRT %>% replace_na("not in CM table")) %>% 
+#   arrange(BC_CAT, BC_TYPE) %>% 
+#   write_csv(., file = "../../Notes & working documents/BC_dict.csv")
+
+```
+
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 9
+#| fig-cap: Participants with non-hormonal IUDs
+
+participants_with_non_hormonal_IUD <- 
+  BC_events %>% 
+  filter(VALUE == "INTRAUTERINE DEVICE, NON-HORMONAL", DAY > -1) %>% 
+  select(USUBJID) %>% distinct() %>% unlist()
+
+ggplot(BC_events %>% 
+         mutate(
+           TMP = str_c(VALUE, " - unspecified"),
+           NOTE = ifelse(is.na(NOTE), TMP, NOTE)) %>% 
+         filter(USUBJID %in% participants_with_non_hormonal_IUD), 
+       aes(x = DAY, y = NOTE, fill = VALUE)) +
+  geom_tile(alpha = 0.5) +
+  facet_grid(USUBJID ~ ., scales = "free_y", space = "free") +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0))
+
+```
+
+
+Finally, we do some renaming of birth control methods so that the figure legends are less "dramatic" (no caps, etc.)
+
+```{r}
+
+# Renaming birth controls so that figure legends are less dramatic
+
+BC_events <- 
+  BC_events %>% 
+  mutate(
+    VALUE = 
+      VALUE %>% 
+      str_to_lower() %>% 
+      str_replace_all("intrauterine device", "IUD") %>% 
+      str_replace_all("plus", "+") %>% 
+      str_remove_all("monogamous relationship with ")
+  )
+
+BC_events |> count(VALUE) |> knitr::kable(caption = "Number of times each birth control method was used (a participant can use several of these methods)")
+
+
+
+```
+
+
+
+
+
+## Concomittant medications
+
+We filter for medications in these 5 broad categories:
+
+1. vaginal antibiotics (MTZ or clyndomicin)
+2. oral antibiotics
+3. antifungic
+4. douching (boric acid, rephresh, etc.)
+5. (vaginal/systemic) steroids
+
+So that, for each of these categories, the events table will hold the days on which these medications were taken
+
+### Concomittant medications categories and filters
+
+First, we create a dictionary of CM
+
+```{r}
+
+ADCM <- readxl::read_xlsx(stringr::str_c(ADaM_dir, "ADCM.xlsx"), guess_max = 10000)
+
+vaginal_antibiotics <- 
+  c("METROGEL", "METRONIDAZOLE","METRONIDAZOLE GEL",
+    "CLINDAMYCIN", "CLINDAMYCIN 2%")
+
+oral_antibiotics <- 
+  c("AMOXICILLIN", "AMOXICILLIN CLAVULANATE IV","AMOXICILLIN CLAVULANATE ORAL",
+    "AZITHROMYCIN", "BACTRIM DS", "CEFTRIAXONE", "CIPROFLOXACIN",
+    "DOXYCYCLINE","DOXYCYCLINE HYCLATE","FLAGYL","KEFLEX", "NITROFURANTOIN", "MACROBID",
+    "UNKNOWN ANTIBIOTIC")
+
+steroids <- 
+  c("HYDROCORTISONE CREAM","PREDNISOLONE ACETATE","PREDNISONE", "DEXAMETHASONE")
+
+douching_agents <- 
+  c("BORIC ACID VAGINAL CAPSULES","BORIC ACID VAGINAL DOUCHE", 
+    "BAKING SODA DOUCHE", "DESITIN CREAM", "LUVENA",
+    "PROBIOTIC POWDER GARDEN OF LIFE",
+    "REPHRESH","REPHRESH PH INTRAVAGINAL APPLICATOR","VAGINAL REPHRESH GEL",
+    "SUMMERS EVE DOUCHE","VAGINAL COLLOIDAL SILVER",
+    "VAGINAL DOUCHE","VAGINAL HYDROGEN PEROXIDE WASH")
+
+antifungic <-  
+  c("CLOTRIMAZOLE", "CLOTRIMAZOLE 2% VAGINAL CREAM", 
+    "CLOTRIMAZOLE VAGINAL CREAM", "DIFLUCAN", "FLUCONAZOLE", 
+    "MICONAZOLE", "MICONAZOLE CREAM","MICONAZOLE NITRATE",
+    "MONISTAT","MONISTAT 1","MONISTAT OVULE VAGINAL","MONISTAT VAGINAL CREAM",
+    "LAMISIL 1% VAGINALLY EXTERNAL"
+    )
+
+CM_dict <- 
+  ADCM %>% 
+  select(CMINDC, CMTRT, CMDECOD, ATC1, ATC2, ATC3, ATC4) %>% 
+  distinct() %>% 
+  arrange(CMTRT) %>% 
+  mutate(
+    CM_CAT = 
+      case_when(
+        CMTRT %in% vaginal_antibiotics ~ "Vaginal antibiotics",
+        CMTRT %in% oral_antibiotics ~ "Oral antibiotics",
+        CMTRT %in% steroids ~ "Steroids",
+        CMTRT %in% douching_agents ~ "Douching",
+        CMTRT %in% antifungic ~ "Antifungal",
+        TRUE ~ NA_character_
+      )
+  ) %>% 
+  select(CM_CAT, everything())
+
+# write_csv(CM_dict %>% arrange(CM_CAT, CMTRT), 
+#           file = "../../Notes & working documents/CM_dict.csv")
+# 
+# 
+# write_csv(
+#   CM_dict %>% arrange(CM_CAT, CMTRT) %>% 
+#     select(-CMINDC, -starts_with("ATC")) %>% filter(!is.na(CM_CAT)) %>%
+#     distinct(), 
+#   file = "../../Notes & working documents/CM_dict_short_version.csv"
+# )
+
+CM_dict %>% arrange(CM_CAT) |> filter(!is.na(CM_CAT)) %>% knitr::kable()
+
+```
+
+
+```{r}
+
+selected_CM <- 
+  left_join(
+    ADCM,
+    CM_dict, 
+    by = c("CMTRT", "CMDECOD", "ATC1", "ATC2", "ATC3", "ATC4", "CMINDC")
+    ) %>% 
+  filter(!is.na(CM_CAT)) %>% 
+  select(USUBJID, CMTRT, CM_CAT, ASTDT, AENDT, CMONGOFL) %>% 
+  mutate(
+    start_date = as.Date(ASTDT, format = "%d%b%Y"),
+    end_date = as.Date(AENDT, format = "%d%b%Y")
+    ) %>% 
+  left_join(
+    ADSL |> 
+      select(USUBJID, TRTSDT, EOSDT) |> 
+      mutate(
+        TRTSDT = TRTSDT |> as.Date(format = "%d%b%Y"),
+        EOSDT = EOSDT |> as.Date(format = "%d%b%Y")
+      ), 
+    by = "USUBJID") %>% 
+  mutate(
+    end_date = pmin(end_date, EOSDT, na.rm = TRUE),
+    start_day = (start_date - TRTSDT) %>% as.numeric(units = "days"),
+    start_day = ifelse(start_day >= 0, start_day + 1, start_day),
+    start_day = pmax(start_day, -30),
+    end_day = (end_date - TRTSDT) %>% as.numeric(units = "days"),
+    end_day = ifelse(end_day >= 0, end_day + 1, end_day),
+    end_day = pmax(end_day, -30),
+    duration = end_day - start_day + 1,
+    id = row_number()
+  ) %>% 
+  filter(end_day > 0) # we remove all CM that ended before the treatment
+
+```
+
+```{r}
+
+# selected_CM %>% 
+#   filter(CM_CAT == "Douching") %>% 
+#   group_by(CMTRT, CM_CAT) %>% 
+#   summarize(
+#     n_participant = length(unique(USUBJID)),
+#             n_event = n(),
+#     .groups = "drop") %>% 
+#   write_csv(., file = "../../Notes & working documents/Douching_products.csv")
+
+```
+
+
+
+### Concomitant medication events
+
+For the concomitant medication event table, we keep the category of the medication in the `VARIABLE` column.
+The `VALUE` column contains the name of the medication and the `NOTE` column contains the dosage and frequency of the medication.
+
+```{r}
+
+CM_events <- 
+  selected_CM[rep(1:nrow(selected_CM), selected_CM$duration),] %>%
+  select(USUBJID, CMTRT, CM_CAT, start_day, id) %>% 
+  group_by(id) %>% 
+  mutate(DAY = start_day + row_number() - 1) %>% 
+  ungroup() %>% 
+  filter(DAY != 0) %>% 
+  mutate(
+    CATEGORY = "Concomitant medication",
+    VARIABLE = CM_CAT,
+    VALUE = CMTRT %>%  str_to_sentence(),
+    NUMBER = NA_integer_,
+    NOTE = NA_character_
+  ) %>% 
+  select(USUBJID, DAY, CATEGORY, VARIABLE, NUMBER, VALUE,  NOTE) %>% 
+  arrange(USUBJID, DAY)
+
+CM_events |> head() |> knitr::kable()
+
+```
+
+
+
+
+```{r}
+#| fig-cap: Examples of concomitant medication time-line for a few participants
+
+ggplot(CM_events %>% filter(USUBJID %in% unique(CM_events$USUBJID)[1:20]),
+       aes(x = DAY, y = VALUE, fill = VARIABLE )) +
+  geom_tile(alpha = 0.5)+
+  facet_grid(USUBJID ~ ., scales = "free_y", space = "free") +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
+  expand_limits(x = 0)
+
+```
+
+## Symptoms
+
+The data about daily (then weekly) local symptoms is stored in the `FA` table.
+
+
+```{r}
+
+Symptoms_events <- 
+  FA %>% 
+  filter(FACAT == "LOCAL")  %>% 
+  select(USUBJID, FASPID, FADY, FAOBJ, FAORRES) %>% 
+  mutate(
+    DAY = FADY %>% as.integer(),
+    CATEGORY = "Symptoms",
+    VARIABLE =  FAOBJ %>% str_to_sentence(),
+    NUMBER = 
+      case_when(
+        FAORRES == "NONE" ~ 0L,
+        FAORRES == "MILD" ~ 1L,
+        FAORRES == "MODERATE" ~ 2L,
+        FAORRES == "SEVERE" ~ 3L,
+        TRUE ~ NA_integer_
+      ),
+    VALUE = FAORRES %>% str_to_sentence(),
+    NOTE = 
+      case_when(
+        FASPID %in% c("12","19") ~ "Symptoms between DAY and DAY+6 incl.",
+        TRUE ~ NA_character_
+      )
+    ) %>% 
+  select(USUBJID, DAY, CATEGORY, VARIABLE, NUMBER, VALUE, NOTE)
+
+
+```
+
+
+The frequency of the reported symptoms is as follow:
+
+```{r}
+
+Symptoms_events %>% 
+  filter(VALUE != "None") %>% 
+  group_by(VARIABLE, VALUE) %>% 
+  summarize(n_times_reported = n(),.groups = "drop") %>% 
+  knitr::kable()
+
+```
+
+
+
+
+## Concatenating events tables
+
+We now have all of our separatw events tables. We can concatenate them into a single table.
+
+```{r}
+
+events <- 
+  bind_rows(
+    doses_events,
+    menstruation_events,
+    sex_events,
+    BC_events,
+    CM_events,
+    Symptoms_events
+  ) %>% 
+  mutate(CATEGORY = CATEGORY |> factor(levels = get_fct_values("CATEGORY")))
+
+```
+
+The size of this table is
+
+```{r}
+
+dim(events)
+
+```
+
+
+
+
+## Events data viz
+
+The function `plot_participant_events` allows to visualize the time-line of events of a given participant.
+
+```{r}
+#| fig-height: 3
+
+plot_participant_events(events %>% filter(USUBJID == "STI.00185"), title = TRUE)
+plot_participant_events(events %>% filter(USUBJID == "STI.01162"), title = TRUE)
+plot_participant_events(events %>% filter(USUBJID == "STI.00377"), title = TRUE)
+
+```

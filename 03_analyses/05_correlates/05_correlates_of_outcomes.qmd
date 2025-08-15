@@ -1,0 +1,4127 @@
+---
+title: "Correlates of outcomes" 
+author: Laura Symul
+format: 
+   html:
+     page-layout: full
+     code-fold: true
+     toc: true
+     toc-location: left
+     toc-depth: 5
+     embed-resources: true
+execute:
+  cache: true  # true | refresh
+knitr:
+  opts_chunk:
+    out.width: "100%"
+editor: source
+---
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+rm(list = ls())
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(gt)
+library(ggrepel)
+library(ggcorrplot)
+library(MBViz) # devtools::install_github("lasy/MBViz")
+library(ggtext)
+library(ade4)
+library(pls)
+library(adegraphics)
+library(packMBPLSDA)
+library(parallel)  # for jobs repartition
+library(doParallel) # for iterations
+library(foreach)
+
+```
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+theme_set(theme_publication())
+
+```
+
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(dir = str_c(data_dir(), "03_augmented_mae/")) 
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame() |> as_tibble()
+
+```
+
+
+MB-PLS-DA global parameters
+
+```{r}
+#| echo: true
+
+mbplsda_par <- 
+  list(
+    max_ncomp = 15, # maximum number of latent components to consider
+    opt_ncomp = NULL, # we use cross-validation to determine the optimal number of latent components
+    cv_nrepet = 40, # 20, # number of repetitions for cross-validation
+    cv_prop = 3/4, # proportion of samples to use for calibration
+    npermut = 0, # 20, # number of permutations for the permutation test # 0 = no permutation test
+    nboot = 500, # 500, # number of bootstrap samples for the bootstrap test
+    cpus = 10 # number of cpus to use for parallel computation
+  )
+mbplsda_par
+
+```
+
+
+Saving/running options:
+
+```{r}
+
+IO_par <- 
+  list(
+    save_results = TRUE,
+    output_dir = str_c(data_dir(), "04_results/MBPLSDA_consecutive/"),
+    force_execution = FALSE
+  )
+
+```
+
+
+
+# Cytokine residuals (predicted from microbiota composition expressed as subcommunity composition)
+
+
+Since we've seen in our previous analysis that there was some correlation between microbiota composition and cytokine transformed concentrations, we are interested in including the residuals from the microbiota composition-based predictions rather than the actual transformed concentrations.
+
+So, first, we need to predict cytokines from microbiota and add the predicted and residuals as assays to the mae.
+We do the prediction using a PLS model (making assumption of linear relationships).
+
+```{r}
+
+X <- 
+  get_assay_wide_format(mae, "c_topics_16S_8", add_colData = FALSE) |> 
+  mutate(assay = assay |> as.matrix()) |> 
+  dplyr::rename(mb = assay) 
+ 
+Y <- 
+  get_assay_wide_format(mae, "cytokine_log10_SE_corrected_incl_cytokine", add_colData = FALSE) |> 
+  mutate(assay = assay |> as.matrix()) |> 
+  dplyr::rename(cytokine = assay)
+
+combined <- inner_join(X, Y, by = join_by(Barcode))
+
+cytokine_pls <- pls::plsr(cytokine ~ mb, 7, data = combined, validation = "CV")
+
+opt_ncomp <- 6
+
+pls::MSEP(cytokine_pls) |> 
+  as_tibble() |>
+  filter(estimate == "CV") |> 
+  ggplot() +
+  aes(x = comps, y = value, color = response) +
+  facet_wrap(response ~ .) +
+  geom_vline(xintercept = opt_ncomp, linetype = 2, col = "gray") +
+  geom_line() +
+  geom_point()  +
+  ylab("MSEP") +
+  guides(col = "none") 
+
+pls::MSEP(cytokine_pls) |> 
+  as_tibble() |>
+  filter(estimate == "CV") |> 
+  ggplot() +
+  aes(x = comps, y = value, color = response) +
+  facet_wrap(response ~ ., scale = "free_y") +
+  geom_vline(xintercept = opt_ncomp, linetype = 2, col = "gray") +
+  geom_line() +
+  geom_point()  +
+  ylab("MSEP") +
+  guides(col = "none") 
+
+
+inner_join(
+  combined$cytokine |> 
+    as_tibble() |> 
+    mutate(Barcode = combined$Barcode) |> 
+    pivot_longer(cols = -Barcode, names_to = "cytokine", values_to = "Observed"),
+  cytokine_pls$fitted.values[,,opt_ncomp] |> 
+    as_tibble() |> 
+    mutate(Barcode = combined$Barcode) |> 
+    pivot_longer(cols = -Barcode, names_to = "cytokine", values_to = "Predicted"),
+  by = join_by(Barcode, cytokine)
+) |> 
+  ggplot(aes(x = Observed, y = Predicted)) +
+  geom_abline(slope = 1, intercept = 0, col = "black") +
+  geom_point(size = 0.5, alpha = 0.5) + 
+  geom_smooth(method = "lm", formula = "y ~ x") +
+  facet_wrap(cytokine ~ .) 
+
+
+inner_join(
+   cytokine_pls$fitted.values[,,opt_ncomp] |> 
+    as_tibble() |> 
+    mutate(Barcode = combined$Barcode) |> 
+    pivot_longer(cols = -Barcode, names_to = "cytokine", values_to = "Predicted"),
+  cytokine_pls$residuals[,,opt_ncomp] |> 
+    as_tibble() |> 
+    mutate(Barcode = combined$Barcode) |> 
+    pivot_longer(cols = -Barcode, names_to = "cytokine", values_to = "Residuals"),
+  by = join_by(Barcode, cytokine)
+) |> 
+  ggplot(aes(x = Predicted, y = Residuals)) +
+  geom_point(size = 0.5, alpha = 0.5) + 
+  geom_smooth(method = "lm", formula = "y ~ x") +
+  facet_wrap(cytokine ~ ., scales = "free") 
+
+
+inner_join(
+   combined$cytokine |> 
+    as_tibble() |> 
+    mutate(Barcode = combined$Barcode) |> 
+    pivot_longer(cols = -Barcode, names_to = "cytokine", values_to = "Observed"),
+  cytokine_pls$residuals[,,opt_ncomp] |> 
+    as_tibble() |> 
+    mutate(Barcode = combined$Barcode) |> 
+    pivot_longer(cols = -Barcode, names_to = "cytokine", values_to = "Residuals"),
+  by = join_by(Barcode, cytokine)
+) |> 
+  ggplot(aes(x = Observed, y = Residuals)) +
+  geom_point(size = 0.5, alpha = 0.5) + 
+  geom_smooth(method = "lm", formula = "y ~ x") +
+  facet_wrap(cytokine ~ ., scales = "free") 
+
+```
+
+We see that our predictions are actually quite bad except for a few cytokines. This means that the residuals are quite correlated with actual concentrations, so we expect similar results regardless of whether we use residuals or transformed concentrations, unless there are strong effects and opposite effects from cytokines relative to microbiota composition.
+
+
+```{r}
+
+cytokine_residuals_assay <- list()
+cytokine_residuals_assay[["cytokine_residuals"]] <-
+  SummarizedExperiment::SummarizedExperiment(
+    assay =  
+      cytokine_pls$residuals[,,opt_ncomp] |> 
+      t() |> as.data.frame() |> set_colnames(combined$Barcode)
+  )
+
+mae <- c(mae, cytokine_residuals_assay)
+
+```
+
+
+```{r}
+
+model_par <- list(seed = 1, mae = mae)
+
+```
+
+
+
+
+# Microbiota categories (≥ 50% *L. crispatus*, ≥ 50% *Lactobacillus* and < 50% *L. crispatus*, < 50% *Lactobacillus*)
+
+```{r}
+model_par$output_var <- "microbiota categories"
+n_resp_cat <- 3
+```
+
+
+## In the Lactin-V arm
+
+```{r}
+model_par$arm <- "Lactin-V"
+```
+
+
+
+### From post-MTZ to week 4
+
+```{r}
+model_par$target_visit <- 2
+```
+
+#### Full model
+
+```{r}
+model_par$model <- "full"
+mbplsda_par$opt_ncomp_max <- n_resp_cat - 1
+```
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 25
+#| fig-height: 45
+
+plot_mbplsda_outputs(mod_res = mod_res)
+
+```
+
+
+
+```{r}
+
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+
+```
+
+
+
+```{r}
+
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+
+```
+
+
+```{r}
+mod_week4 <- mod_res
+```
+
+
+#### Extended model
+
+```{r}
+model_par$model <- "extended"
+mbplsda_par$opt_ncomp_max <- mod_week4$opt_ncomp
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week4_ext <- mod_res
+```
+
+
+#### Reduced model
+
+```{r}
+model_par$model <- "reduced"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week4_red <- mod_res
+```
+
+
+
+#### Minimal model
+
+```{r}
+model_par$model <- "minimal"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week4_min <- mod_res
+```
+
+
+#### Self-predicting
+
+```{r}
+
+mod_week4_self <- self_predicting_model(mod_week4)
+mod_week4_self$cv$summary |> filter(metric == "average F1 score")
+mod_week4_self$cv$summary |> filter(metric == "accuracy")
+
+```
+
+#### Comparison of nested models
+
+```{r}
+#| fig-width: 2
+#| fig-height: 4
+
+sel_metric <- "average F1 score"
+
+plot_models_cv(
+  full = mod_week4, ext = mod_week4_ext, red = mod_week4_red, 
+  min = mod_week4_min, self = mod_week4_self,
+  opt_ncomp = mod_week4$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Initial phase", subtitle = "from post-MTZ to week 4") + guides(col = "none")
+
+
+sel_metric <- "accuracy"
+
+plot_models_cv(
+  full = mod_week4, ext = mod_week4_ext, red = mod_week4_red, 
+  min = mod_week4_min, self = mod_week4_self,
+  opt_ncomp = mod_week4$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Initial phase", subtitle = "from post-MTZ to week 4") + guides(col = "none")
+
+
+```
+
+
+
+#### Marginal distributions in explanatory variables
+
+```{r}
+#| fig-width: 15
+#| fig-height: 10
+
+block_colors <- get_block_colors(mod_week4$inputs |> names())
+plot_marginal_inputs(mod_week4) +
+  scale_fill_manual(values = block_colors)
+
+```
+
+
+
+
+
+### From week 4 to week 8 and week 8 to week 12
+
+
+
+```{r}
+model_par$target_visit <- 3
+```
+
+#### Full model
+
+```{r}
+model_par$model <- "full"
+mbplsda_par$opt_ncomp_max <- n_resp_cat - 1
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12 <- mod_res
+```
+
+
+
+
+#### Extended model
+
+```{r}
+model_par$model <- "extended"
+mbplsda_par$opt_ncomp_max <- mod_week8_and_12$opt_ncomp
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12_ext <- mod_res
+```
+
+
+#### Reduced model
+
+
+```{r}
+model_par$model <- "reduced"
+```
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12_red <- mod_res
+```
+
+
+#### Minimal model
+
+
+```{r}
+model_par$model <- "minimal"
+```
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12_min <- mod_res
+```
+
+
+
+#### Self-predicting model
+
+
+```{r}
+
+mod_week8_and_12_self <- self_predicting_model(mod_week8_and_12)
+mod_week8_and_12_self$cv$summary |> filter(metric == "average F1 score")
+
+```
+
+
+
+#### Comparison of nested models
+
+```{r}
+#| fig-width: 2
+#| fig-height: 4
+
+sel_metric <- "average F1 score"
+
+plot_models_cv(
+  full = mod_week8_and_12, ext = mod_week8_and_12_ext, red = mod_week8_and_12_red, 
+  min = mod_week8_and_12_min, self = mod_week8_and_12_self,
+  opt_ncomp = mod_week8_and_12$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Continuation phase", subtitle = "from week 4 to week 8 to week 12") + 
+  guides(col = "none")
+
+
+sel_metric <- "accuracy"
+
+plot_models_cv(
+  full = mod_week8_and_12, ext = mod_week8_and_12_ext, red = mod_week8_and_12_red, 
+  min = mod_week8_and_12_min, self = mod_week8_and_12_self,
+  opt_ncomp = mod_week8_and_12$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Continuation phase", subtitle = "from week 4 to week 8 to week 12") + 
+  guides(col = "none")
+
+```
+
+#### Marginal distributions in explanatory variables
+
+```{r}
+#| fig-width: 15
+#| fig-height: 10
+
+block_colors <- get_block_colors(mod_week8_and_12$inputs |> names())
+
+plot_marginal_inputs(mod_week8_and_12) +
+  scale_fill_manual(values = block_colors)
+
+```
+
+### From week 12 to week 24
+
+```{r}
+model_par$target_visit <- 7
+```
+
+#### Full model
+
+```{r}
+model_par$model <- "full"
+mbplsda_par$opt_ncomp_max <- n_resp_cat - 1
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24 <- mod_res
+```
+
+
+#### Extended model
+
+```{r}
+model_par$model <- "extended"
+mbplsda_par$opt_ncomp_max <- mod_week24$opt_ncomp
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24_ext <- mod_res
+```
+
+
+
+#### Reduced model
+
+```{r}
+model_par$model <- "reduced"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24_red <- mod_res
+```
+
+
+#### Minimal model
+
+```{r}
+model_par$model <- "minimal"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24_min <- mod_res
+```
+
+
+#### Self-predicting model
+
+
+```{r}
+
+mod_week24_self <- self_predicting_model(mod_week24)
+mod_week24_self$cv$summary |> filter(metric == "average F1 score")
+
+```
+
+
+#### Comparison of nested models
+
+```{r}
+#| fig-width: 2
+#| fig-height: 4
+
+sel_metric <- "average F1 score"
+
+plot_models_cv(
+  full = mod_week24, ext = mod_week24_ext, red = mod_week24_red, 
+  min = mod_week24_min, self = mod_week24_self,
+  opt_ncomp = mod_week24$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Follow-up phase", subtitle = "from week 12 to week 24") + 
+  guides(col = "none")
+
+
+
+sel_metric <- "accuracy"
+
+plot_models_cv(
+  full = mod_week24, ext = mod_week24_ext, red = mod_week24_red, 
+  min = mod_week24_min, self = mod_week24_self,
+  opt_ncomp = mod_week24$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Follow-up phase", subtitle = "from week 12 to week 24") + 
+  guides(col = "none")
+
+```
+
+#### Marginal distributions in explanatory variables
+
+```{r}
+#| fig-width: 15
+#| fig-height: 10
+
+block_colors <- get_block_colors(mod_week24$inputs |> names())
+
+plot_marginal_inputs(mod_week24) +
+  scale_fill_manual(values = block_colors)
+
+```
+
+### Comparing models
+
+```{r}
+
+block_colors <- get_block_colors(mod_week4$inputs |> names())
+block_colors_ext <- get_block_colors(mod_week4_ext$inputs |> names())
+block_colors_red <- get_block_colors(mod_week4_red$inputs |> names())
+block_colors_min <- get_block_colors(mod_week4_min$inputs |> names())
+
+
+```
+
+
+#### Full vs nested models
+
+```{r}
+
+w4_phase <- "Initial phase (post-MTZ to week 4)"
+w8_12_phase <- "Continuation phase (week 4 to 8 to 12)"
+w24_phase <- "Follow-up phase (week 12 to 24)"
+
+get_accuracy <- function(mod_res){
+  mean(mod_res$predictions$pred_fct == mod_res$output_fct)
+}
+
+get_accuracy_seld <- function(mod_res_self){
+  mod_res_self$cv$summary |> 
+    filter(metric == "accuracy", set == "whole dataset") |> 
+    pull(mean)
+}
+
+accuracies <- 
+  bind_rows(
+    tibble(Phase = w4_phase, type = "Full", Accuracy = get_accuracy(mod_week4)),
+    tibble(Phase = w4_phase, type = "Extended", Accuracy = get_accuracy(mod_week4_ext)),
+    tibble(Phase = w4_phase, type = "Reduced", Accuracy = get_accuracy(mod_week4_red)),
+    tibble(Phase = w4_phase, type = "Minimal", Accuracy = get_accuracy(mod_week4_min)),
+    tibble(Phase = w4_phase, type = "Self-predicting", Accuracy = get_accuracy_seld(mod_week4_self)),
+    
+    tibble(Phase = w8_12_phase, type = "Full", Accuracy = get_accuracy(mod_week8_and_12)),
+    tibble(Phase = w8_12_phase, type = "Extended", Accuracy = get_accuracy(mod_week8_and_12_ext)),
+    tibble(Phase = w8_12_phase, type = "Reduced", Accuracy = get_accuracy(mod_week8_and_12_red)),
+    tibble(Phase = w8_12_phase, type = "Minimal", Accuracy = get_accuracy(mod_week8_and_12_min)),
+    tibble(Phase = w8_12_phase, type = "Self-predicting", Accuracy = get_accuracy_seld(mod_week8_and_12_self)),
+    
+    tibble(Phase = w24_phase, type = "Full", Accuracy = get_accuracy(mod_week24)),
+    tibble(Phase = w24_phase, type = "Extended", Accuracy = get_accuracy(mod_week24_ext)),
+    tibble(Phase = w24_phase, type = "Reduced", Accuracy = get_accuracy(mod_week24_red)),
+    tibble(Phase = w24_phase, type = "Minimal", Accuracy = get_accuracy(mod_week24_min)),
+    tibble(Phase = w24_phase, type = "Self-predicting", Accuracy = get_accuracy_seld(mod_week24_self))
+  ) |> 
+  mutate(Phase = Phase |> fct_inorder(), type = type |> fct_inorder() |> fct_rev())
+
+accuracies |> 
+  ggplot(aes(x = type, y = Accuracy)) +
+  geom_col() +
+  facet_grid(. ~ Phase) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("") 
+
+```
+
+
+```{r}
+#| fig-height: 9
+#| fig-width: 7
+
+opt_ncomp <- 2
+
+get_f1 <- function(mod_res){
+  mod_res$cv$summary_by_fold_and_class |> filter(dim == opt_ncomp) |> ungroup()
+}
+
+bind_rows(
+  get_f1(mod_week4) |> mutate(Model = "Full", phase = w4_phase),
+  get_f1(mod_week4_ext) |> mutate(Model = "Extended", phase = w4_phase),
+  get_f1(mod_week4_red) |> mutate(Model = "Reduced", phase = w4_phase),
+  get_f1(mod_week4_min) |> mutate(Model = "Minimal", phase = w4_phase),
+  
+  get_f1(mod_week8_and_12) |> mutate(Model = "Full", phase = w8_12_phase),
+  get_f1(mod_week8_and_12_ext) |> mutate(Model = "Extended", phase = w8_12_phase),
+  get_f1(mod_week8_and_12_red) |> mutate(Model = "Reduced", phase = w8_12_phase),
+  get_f1(mod_week8_and_12_min) |> mutate(Model = "Minimal", phase = w8_12_phase),
+  
+  get_f1(mod_week24) |> mutate(Model = "Full", phase = w24_phase),
+  get_f1(mod_week24_ext) |> mutate(Model = "Extended", phase = w24_phase),
+  get_f1(mod_week24_red) |> mutate(Model = "Reduced", phase = w24_phase),
+  get_f1(mod_week24_min) |> mutate(Model = "Minimal", phase = w24_phase)
+) |> 
+  mutate(
+    Model = Model |> fct_inorder() |> fct_rev(), 
+    phase = phase |> str_replace("\\(", "\n\\(") |> fct_inorder()
+    ) |>
+  ggplot(aes(x = Model, y = F1, col = set, fill = set)) +
+  geom_boxplot(alpha = 0.5, outlier.size = 0.5) +
+  facet_grid(phase ~ true_class, scales = "free_y") +
+  scale_color_manual("", values = c("calibration" = "black", "validation" = "turquoise3", "random predictions" = "gray")) +
+  scale_fill_manual("", values = c("calibration" = "black", "validation" = "turquoise3", "random predictions" = "gray")) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) 
+
+```
+
+
+```{r}
+
+sel_metric <- "average F1 score"
+
+plot_models_cv(
+  full = mod_week4, ext = mod_week4_ext, red = mod_week4_red, 
+  min = mod_week4_min, self = mod_week4_self,
+  opt_ncomp = mod_week4$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Initial phase", subtitle = "from post-MTZ to week 4") + guides(col = "none") +
+  plot_models_cv(
+    full = mod_week8_and_12, ext = mod_week8_and_12_ext, red = mod_week8_and_12_red, 
+    min = mod_week8_and_12_min, self = mod_week8_and_12_self, 
+    opt_ncomp = mod_week8_and_12$opt_ncomp, selected_metric = sel_metric
+    ) +
+  ggtitle("Continuation phase", subtitle = "from week 4 to week 8 and 12") + guides(col = "none") +
+  plot_models_cv(
+    full = mod_week24, ext = mod_week24_ext, red = mod_week24_red, 
+    min = mod_week24_min, self = mod_week24_self, 
+    opt_ncomp = mod_week24$opt_ncomp, selected_metric = sel_metric
+    ) + 
+  ggtitle("Follow-up phase", subtitle = "from week 12 to week 24") + guides(col = "none")
+
+
+sel_metric <- "accuracy"
+
+plot_models_cv(
+  full = mod_week4, ext = mod_week4_ext, red = mod_week4_red, 
+  min = mod_week4_min, self = mod_week4_self,
+  opt_ncomp = mod_week4$opt_ncomp, selected_metric = sel_metric
+  ) + 
+  ggtitle("Initial phase", subtitle = "from post-MTZ to week 4") + guides(col = "none") +
+  plot_models_cv(
+    full = mod_week8_and_12, ext = mod_week8_and_12_ext, red = mod_week8_and_12_red, 
+    min = mod_week8_and_12_min, self = mod_week8_and_12_self, 
+    opt_ncomp = mod_week8_and_12$opt_ncomp, selected_metric = sel_metric
+    ) +
+  ggtitle("Continuation phase", subtitle = "from week 4 to week 8 and 12") + guides(col = "none") +
+  plot_models_cv(
+    full = mod_week24, ext = mod_week24_ext, red = mod_week24_red, 
+    min = mod_week24_min, self = mod_week24_self, 
+    opt_ncomp = mod_week24$opt_ncomp, selected_metric = sel_metric
+    ) + 
+  ggtitle("Follow-up phase", subtitle = "from week 12 to week 24") + guides(col = "none")
+
+
+```
+
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 15
+
+
+plot_confusion_matrix(mod_week4$output_fct, pred_outcomes = mod_week4$predictions$pred_fct) + 
+  ggtitle("post-MTZ to week 4", subtitle = "Full model") + 
+  
+plot_confusion_matrix(mod_week4_ext$output_fct, pred_outcomes = mod_week4_ext$predictions$pred_fct) +
+  ggtitle("", subtitle = "Extended model") +
+  
+plot_confusion_matrix(mod_week4_red$output_fct, pred_outcomes = mod_week4_red$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Reduced model") +
+  
+  
+plot_confusion_matrix(mod_week4_min$output_fct, pred_outcomes = mod_week4_min$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Minimal model") +
+  
+  
+  
+plot_confusion_matrix(mod_week8_and_12$output_fct, pred_outcomes = mod_week8_and_12$predictions$pred_fct) + 
+  ggtitle("Week 4 to week 8 and 12", subtitle = "Full model") + 
+  
+plot_confusion_matrix(mod_week8_and_12_ext$output_fct, pred_outcomes = mod_week8_and_12_ext$predictions$pred_fct) +
+  ggtitle("", subtitle = "Extended model") +
+  
+plot_confusion_matrix(mod_week8_and_12_red$output_fct, pred_outcomes = mod_week8_and_12_red$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Reduced model") +
+  
+  
+plot_confusion_matrix(mod_week8_and_12_min$output_fct, pred_outcomes = mod_week8_and_12_min$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Minimal model") +
+  
+  
+  
+plot_confusion_matrix(mod_week24$output_fct, pred_outcomes = mod_week24$predictions$pred_fct) + 
+  ggtitle("Week 12 to week 24", subtitle = "Full model") + 
+  
+plot_confusion_matrix(mod_week24_ext$output_fct, pred_outcomes = mod_week24_ext$predictions$pred_fct) +
+  ggtitle("", subtitle = "Extended model") +
+  
+plot_confusion_matrix(mod_week24_red$output_fct, pred_outcomes = mod_week24_red$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Reduced model") +
+  
+plot_confusion_matrix(mod_week24_min$output_fct, pred_outcomes = mod_week24_min$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Minimal model") +
+
+  plot_layout(guides = "collect", nrow = 4, byrow = FALSE)
+
+```
+
+#### Blocks
+
+
+```{r}
+#| fig-width: 7
+#| fig-height: 12
+
+plot_mtb_cov(mod_week4$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("post-MTZ to week 4") + 
+plot_mtb_cov(mod_week8_and_12$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("From week 4 to 8 to 12") +
+plot_mtb_cov(mod_week24$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("From week 12 to 24") +
+  plot_layout(guides = "collect", nrow = 3)
+
+```
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week4$res, boot = mod_week4$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Initial phase", subtitle = "post-MTZ to week 4") + 
+  
+plot_mtb_relbipc(mod_week8_and_12$res, boot = mod_week8_and_12$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Continuation phase", subtitle = "From week 4 to 8 to 12") +
+  
+plot_mtb_relbipc(mod_week24$res, boot = mod_week24$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Follow-up phase", subtitle = "From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week4_red$res, boot = mod_week4_red$boot) + 
+  geom_vline(xintercept = c(3.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors_red) + 
+  ggtitle("Initial phase", subtitle = "post-MTZ to week 4") + 
+  
+plot_mtb_relbipc(mod_week8_and_12_red$res, boot = mod_week8_and_12_red$boot) + 
+  geom_vline(xintercept = c(3.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors_red) + 
+  ggtitle("Continuation phase", subtitle = "From week 4 to 8 to 12") +
+  
+plot_mtb_relbipc(mod_week24_red$res, boot = mod_week24_red$boot) + 
+  geom_vline(xintercept = c(3.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors_red) + 
+  ggtitle("Follow-up phase", subtitle = "From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week4_min$res, boot = mod_week4_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  ggtitle("Initial phase", subtitle = "post-MTZ to week 4") + 
+  
+plot_mtb_relbipc(mod_week8_and_12_min$res, boot = mod_week8_and_12_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  ggtitle("Continuation phase", subtitle = "From week 4 to 8 to 12") +
+  
+plot_mtb_relbipc(mod_week24_min$res, boot = mod_week24_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  ggtitle("Follow-up phase", subtitle = "From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+#### Scores & Loadings
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 6
+
+plot_mtb_Xloadings(mod_week4$res) + scale_color_manual(values = block_colors) + ggtitle("post-MTZ to week 4") + 
+plot_mtb_Xloadings(mod_week8_and_12$res) + scale_color_manual(values = block_colors)  + ggtitle("From week 4 to 8 to 12") +
+plot_mtb_Xloadings(mod_week24$res) + scale_color_manual(values = block_colors)  + ggtitle("From week 12 to 24") +
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4.5
+
+plot_mtb_Xloadings(mod_week4$res, boot = mod_week4$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week4$inputs), values = block_colors) + 
+  guides(col = "none") + ggtitle("From post-MTZ to week 4") + 
+  
+plot_mtb_Xloadings(mod_week8_and_12$res, boot = mod_week8_and_12$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week8_and_12$inputs), values = block_colors) + 
+  guides(col = "none") + ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_Xloadings(mod_week24$res, boot = mod_week24$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week24$inputs), values = block_colors) + 
+  guides(col = "none") + ggtitle("From week 12 to 24")
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4.5
+
+plot_mtb_Xloadings(mod_week4_red$res, boot = mod_week4_red$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week4_red$inputs), values = block_colors_red) + 
+  guides(col = "none") + ggtitle("From post-MTZ to week 4", subtitle = "Reduced model") + 
+  
+plot_mtb_Xloadings(mod_week8_and_12_red$res, boot = mod_week8_and_12_red$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week8_and_12_red$inputs), values = block_colors_red) + 
+  guides(col = "none") + ggtitle("From week 4 to 8 to 12", subtitle = "Reduced model") +
+  
+plot_mtb_Xloadings(mod_week24_red$res, boot = mod_week24_red$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week24_red$inputs), values = block_colors_red) + 
+  guides(col = "none") + ggtitle("From week 12 to 24", subtitle = "Reduced model")
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4.5
+
+plot_mtb_Xloadings(mod_week4_min$res, boot = mod_week4_min$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week4_min$inputs), values = block_colors_min) + 
+  guides(col = "none") + ggtitle("From post-MTZ to week 4", subtitle = "Minimal model") + 
+  
+plot_mtb_Xloadings(mod_week8_and_12_min$res, boot = mod_week8_and_12_min$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week8_and_12_min$inputs), values = block_colors_min) + 
+  guides(col = "none") + ggtitle("From week 4 to 8 to 12", subtitle = "Minimal model") +
+  
+plot_mtb_Xloadings(mod_week24_min$res, boot = mod_week24_min$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week24_min$inputs), values = block_colors_min) + 
+  guides(col = "none") + ggtitle("From week 12 to 24", subtitle = "Minimal model")
+
+```
+
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4.5
+
+plot_mtb_Xloadings(mod_week4$res, boot = mod_week4$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week4$inputs), values = block_colors) + 
+  guides(col = "none") + ggtitle("From post-MTZ to week 4", subtitle = "Full model") + 
+  
+plot_mtb_Xloadings(mod_week8_and_12_red$res, boot = mod_week8_and_12_red$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week8_and_12_red$inputs), values = block_colors_red) + 
+  guides(col = "none") + ggtitle("From week 4 to 8 to 12", subtitle = "Reduced model") +
+  
+plot_mtb_Xloadings(mod_week24_ext$res, boot = mod_week24_ext$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week24_ext$inputs), values = block_colors_ext) + 
+  guides(col = "none") + ggtitle("From week 12 to 24", subtitle = "Extended model")
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4$res, samples_color = mod_week4$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4$output_fct)) +  ggtitle("post-MTZ to week 4") + 
+
+plot_mtb_lX(mod_week8_and_12$res, samples_color = mod_week8_and_12$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12$output_fct)) +  ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_lX(mod_week24$res, samples_color = mod_week24$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24$output_fct)) + ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4_ext$res, samples_color = mod_week4_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4_red$output_fct)) +  ggtitle("post-MTZ to week 4", subtitle = "Extended model") + 
+
+plot_mtb_lX(mod_week8_and_12_ext$res, samples_color = mod_week8_and_12_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12_red$output_fct)) +  ggtitle("From week 4 to 8 to 12", subtitle = "Extended model") +
+  
+plot_mtb_lX(mod_week24_ext$res, samples_color = mod_week24_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24_red$output_fct)) + ggtitle("From week 12 to 24", subtitle = "Extended model") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4_red$res, samples_color = mod_week4_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4_red$output_fct)) +  ggtitle("post-MTZ to week 4", subtitle = "Reduced model") + 
+
+plot_mtb_lX(mod_week8_and_12_red$res, samples_color = mod_week8_and_12_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12_red$output_fct)) +  ggtitle("From week 4 to 8 to 12", subtitle = "Reduced model") +
+  
+plot_mtb_lX(mod_week24_red$res, samples_color = mod_week24_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24_red$output_fct)) + ggtitle("From week 12 to 24", subtitle = "Reduced model") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4_min$res, samples_color = mod_week4_min$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4_min$output_fct)) +  ggtitle("post-MTZ to week 4", subtitle = "Minimal model") + 
+
+plot_mtb_lX(mod_week8_and_12_min$res, samples_color = mod_week8_and_12_min$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12_min$output_fct)) +  ggtitle("From week 4 to 8 to 12", subtitle = "Minimal model") +
+  
+plot_mtb_lX(mod_week24_min$res, samples_color = mod_week24_min$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24_min$output_fct)) + ggtitle("From week 12 to 24", subtitle = "Minimal model") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+```{r}
+#| fig-width: 15
+
+plot_mtb_lY(mod_week4$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("post-MTZ to week 4") + 
+
+plot_mtb_lY(mod_week8_and_12$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_lY(mod_week24$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+```{r}
+#| fig-width: 15
+
+plot_mtb_lY(mod_week4_min$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("post-MTZ to week 4") + 
+
+plot_mtb_lY(mod_week8_and_12_min$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_lY(mod_week24_min$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+#### VIPs and Coefficients
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 15
+
+plot_mtb_vipc(mod_week4$res, boot = mod_week4$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(strip.text.x = element_text(angle = 90)) +
+  theme(axis.text.x = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_vipc(mod_week8_and_12$res, boot = mod_week8_and_12$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(strip.text.x = element_blank(), strip.background.x = element_blank()) +
+  theme(axis.text.x = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_vipc(mod_week24$res, boot = mod_week24$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(strip.text.x = element_blank(), strip.background.x = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 3)
+
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+plot_mtb_coef(mod_week4$res, boot = mod_week4$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12$res, boot = mod_week8_and_12$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24$res, boot = mod_week24$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 7
+
+
+plot_mtb_coef(mod_week4_ext$res, boot = mod_week4_ext$boot) + 
+  scale_color_manual(values = block_colors_ext) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12_ext$res, boot = mod_week8_and_12_ext$boot) + 
+  scale_color_manual(values = block_colors_ext) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24_ext$res, boot = mod_week24_ext$boot) + 
+  scale_color_manual(values = block_colors_ext) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 7
+
+
+plot_mtb_coef(mod_week4_red$res, boot = mod_week4_red$boot) + 
+  scale_color_manual(values = block_colors_red) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12_red$res, boot = mod_week8_and_12_red$boot) + 
+  scale_color_manual(values = block_colors_red) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24_red$res, boot = mod_week24_red$boot) + 
+  scale_color_manual(values = block_colors_red) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 7
+
+
+plot_mtb_coef(mod_week4_min$res, boot = mod_week4_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12_min$res, boot = mod_week8_and_12_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24_min$res, boot = mod_week24_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+
+
+
+## Additional analyses for interpretation
+
+### Percentage of each class at each visit
+
+```{r}
+
+categories <- 
+  get_assay_long_format(mae, "mb_categories", values_name = "category") |> 
+  filter(AVISITN > 1, PIPV) |> 
+  select(Barcode, USUBJID, ARM, AVISITN, category) 
+  
+
+categories |> 
+  group_by(ARM, AVISITN) |> 
+  dplyr::count(category) |> 
+  mutate(perc = 100 * n / sum(n)) |> 
+  ungroup()
+
+
+topics <- 
+  get_assay_long_format(mae, "c_topics_16S_8", feature_name = "topic", values_name = "prop", add_rowData = TRUE) |> 
+  filter(AVISITN > 1) |> 
+  select(Barcode, USUBJID, ARM, AVISITN, PIPV, topic, topic_label, prop) 
+  
+topics |> 
+  filter(ARM == "LACTIN-V", PIPV) |> 
+  ggplot(aes(x = prop)) +
+  geom_histogram() +
+  facet_grid(AVISITN ~ topic_label)
+
+
+topics |> 
+  filter(ARM == "LACTIN-V", topic_label == "L. crispatus") |> 
+  ggplot(aes(x = AVISITN, y = prop, group = USUBJID)) +
+  geom_line(alpha = 0.5) +
+  geom_point(alpha = 0.5)
+
+participants_with_extra_visits <- 
+  topics |> filter(!PIPV) |> distinct(USUBJID) |> pull(USUBJID)
+
+
+topics |> 
+  filter(ARM == "LACTIN-V", topic_label == "L. crispatus", USUBJID %in% participants_with_extra_visits) |> 
+  ggplot(aes(x = AVISITN, y = prop, group = USUBJID)) +
+  geom_line(alpha = 0.5) +
+  geom_point(alpha = 0.5, aes(col = PIPV)) +
+  facet_grid(. ~ USUBJID)
+
+```
+
+
+### Initial phase 
+
+#### post-MTZ Load:category
+
+
+```{r}
+
+X <- mod_week4$inputs_raw
+df <- 
+  tibble(
+    load = X$`Vag. env. prev. v.`$`log10(bact. load)`,
+    category_prev_v = colnames(X$`Coloniz. cat. prev. v.`)[apply(X$`Coloniz. cat. prev. v.`, 1, which.max)] |> 
+      factor(levels = colnames(X$`Coloniz. cat. prev. v.`)), 
+    category_week4 = mod_week4$output_fct
+  ) |> 
+  mutate(
+    colonized_with_L_crisp = (category_week4 == "≥ 50% L. crispatus")*1
+  )
+
+ggplot(df, aes(x = category_prev_v, y = load, col = category_week4)) +
+  geom_jitter(height = 0) +
+  scale_color_manual(values = get_topic_colors(c("I","III","IV")))
+
+
+ggplot(df, aes(x = category_week4, y = load, col = category_prev_v)) +
+  geom_jitter(height = 0) +
+  scale_color_manual(values = get_topic_colors(c("I","III","IV")))
+
+
+
+ggplot(df, aes(x = load, y = category_week4 == "≥ 50% L. crispatus", col = category_prev_v)) +
+  geom_jitter(width = 0) +
+  scale_color_manual(values = get_topic_colors(c("I","III","IV")))
+
+
+ggplot(df, aes(x = load, y = colonized_with_L_crisp, col = category_prev_v)) +
+  geom_point(size = 0.5, alpha = 0.4) + 
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  scale_color_manual(values = get_topic_colors(c("I","III","IV")))
+
+df2 <- df |> filter(category_prev_v != "≥ 50% L. crispatus")
+
+glm(colonized_with_L_crisp ~ load, data = df2, family = "binomial") |> summary()
+glm(colonized_with_L_crisp ~ load + category_prev_v, data = df2, family = "binomial") |> summary()
+glm(colonized_with_L_crisp ~ load + category_prev_v + load:category_prev_v, data = df2, family = "binomial") |> summary()
+glm(colonized_with_L_crisp ~ load:category_prev_v, data = df2, family = "binomial") |> summary()
+
+```
+
+
+
+
+#### Pre-MTZ cytokines and week 4 colonization status
+
+
+
+```{r}
+
+cytokines <- 
+  get_assay_long_format(
+    mae, "cytokine_transformed", 
+    feature_name = "cytokine", values_name = "transformed_abundances") |> 
+  left_join(
+    get_assay_long_format(
+      mae, "cytokine_residuals", 
+      feature_name = "cytokine", values_name = "residuals") |> 
+      select(Barcode, cytokine, residuals),
+    by = join_by(Barcode, cytokine)
+  ) |> 
+  select(USUBJID, ARM, AVISITN, cytokine, transformed_abundances, residuals, everything())
+
+colonization <- 
+  get_assay_long_format(mae, "mb_categories", values_name = "colonization_status")  |> 
+  mutate(colonization_status = colonization_status |> factor(levels = mod_week4$output_fct |> levels()))
+
+df <- 
+  cytokines |> 
+  filter(PIPV, AVISITN <= 2, !is.na(ARM)) |> 
+  select(Barcode, USUBJID, ARM, AVISITN, cytokine, transformed_abundances, residuals) |> 
+  left_join(
+    colonization |> filter(AVISITN == 2) |> 
+      select(USUBJID, colonization_status) |> 
+      dplyr::rename(week4_status = colonization_status),
+    by = join_by(USUBJID)
+  )
+
+df |> 
+  filter(ARM == "LACTIN-V", cytokine %in% c("MIG", "IL-1b"),
+         !is.na(week4_status)) |> 
+  ggplot(aes(x = week4_status, y = transformed_abundances, 
+             col = week4_status, fill = week4_status)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_jitter(size = 0.5, width = 0.2) +
+  facet_grid(cytokine ~ AVISITN |> get_visit_labels()) +
+  xlab("Colonization category at week 4") +
+  scale_color_manual("", values = get_topic_colors(c("I","III","IV"))) +
+  scale_fill_manual("", values = get_topic_colors(c("I","III","IV"))) +
+  theme(axis.text.x = element_blank()) +
+  ylab("Transformed log2(concentrations)")
+
+
+
+
+
+df |> 
+  filter(ARM == "LACTIN-V", cytokine %in% c("MIG", "IL-1b"),
+         !is.na(week4_status)) |> 
+  ggplot(aes(x = week4_status, y = residuals, 
+             col = week4_status, fill = week4_status)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_jitter(size = 0.5, width = 0.2) +
+  facet_grid(cytokine ~ AVISITN |> get_visit_labels()) +
+  xlab("Colonization category at week 4") +
+  scale_color_manual("", values = get_topic_colors(c("I","III","IV"))) +
+  scale_fill_manual("", values = get_topic_colors(c("I","III","IV"))) +
+  theme(axis.text.x = element_blank()) +
+  ylab("Residual\ntransformed log2(concentrations)")
+
+
+tmp <- 
+  df |> 
+  filter(cytokine == "MIG", AVISITN == 0,  !is.na(week4_status), ARM == "LACTIN-V") |> 
+  mutate(
+    week4_status = week4_status |> fct_rev(),
+    colonized_with_L_crisp = (week4_status == "≥ 50% L. crispatus") * 1
+    )
+
+lm(transformed_abundances ~ week4_status, data = tmp) |> summary()
+lm(transformed_abundances ~ week4_status, data = tmp) |> anova()
+glm(colonized_with_L_crisp ~ transformed_abundances, data = tmp, family = "binomial") |> summary()
+
+
+tmp <- 
+  df |> 
+  filter(cytokine == "IL-1b", AVISITN == 0,  !is.na(week4_status), ARM == "LACTIN-V") |> 
+    mutate(
+    week4_status = week4_status |> fct_rev(),
+    colonized_with_L_crisp = (week4_status == "≥ 50% L. crispatus") * 1
+    )
+
+lm(transformed_abundances ~ week4_status, data = tmp) |> summary()
+lm(transformed_abundances ~ week4_status, data = tmp) |> anova()
+glm(colonized_with_L_crisp ~ transformed_abundances, data = tmp, family = "binomial") |> summary()
+
+```
+
+
+```{r}
+
+lacto <- 
+  get_assay_long_format(mae, "prop_Lacto", values_name = "prop_Lacto") |>
+  filter(feature == "prop_Lacto") |> 
+  select(Barcode, USUBJID, ARM, AVISITN, prop_Lacto) 
+
+df2 <- 
+  cytokines |> 
+  filter(PIPV, AVISITN <= 2, !is.na(ARM)) |> 
+  select(Barcode, USUBJID, ARM, AVISITN, cytokine, transformed_abundances, residuals)  |> 
+  left_join( lacto |> select(Barcode, prop_Lacto), by = join_by(Barcode))
+
+df2 |> 
+  filter(ARM == "LACTIN-V", cytokine %in% c("MIG", "IL-1b")) |> 
+  ggplot(aes(x = prop_Lacto, y = transformed_abundances)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "lm") +
+  facet_grid(cytokine ~ AVISITN |> get_visit_labels()) +
+  xlab("Proportion of Lactobacillus (same visit)") +
+  ylab("Transformed log concentrations")
+
+df2 |> 
+  filter(ARM == "LACTIN-V", cytokine %in% c("MIG", "IL-1b")) |> 
+  ggplot(aes(x = prop_Lacto, y = residuals)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "lm") +
+  facet_grid(cytokine ~ AVISITN |> get_visit_labels()) +
+  xlab("Proportion of Lactobacillus (same visit)") +
+  ylab("Residual\ntransformed log concentrations")
+
+
+```
+
+
+
+
+### Relationships between demographics and baseline vaginal characteristics
+
+
+```{r}
+
+baseline_characteristics <- mod_week4$inputs[1:3] |> map(~ .x) |> bind_cols() 
+baseline_pca <- prcomp(baseline_characteristics)
+baseline_pca |> screeplot(npcs = 27)
+baseline_pca |> biplot(cex = 0, xlabs = rep("", nrow(baseline_characteristics)))
+baseline_pca |> biplot(cex = 0, xlabs = rep("", nrow(baseline_characteristics)), choices = 3:4)
+
+
+```
+
+
+
+#### Microbiota
+
+
+```{r}
+
+mb_preMTZ <- 
+  get_assay_long_format(
+    mae, "c_topics_16S_8", feature_name = "subcommunity", values_name = "prop"
+    ) |> 
+  filter(AVISITN == 0, !is.na(RACEGR2))
+
+mb_preMTZ |> 
+  ggplot(aes(x = RACEGR2, y = prop, col = RACEGR2, fill = RACEGR2)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+  geom_jitter(size = 0.25, width = 0.1) +
+  facet_grid(. ~ subcommunity, scales = "free_y") +
+  scale_x_discrete("", breaks = NULL) +
+  scale_color_manual("", values = c("purple", "goldenrod4", "steelblue1")) + 
+  scale_fill_manual("", values = c("purple", "goldenrod4", "steelblue1")) +
+  ggtitle("pre-MTZ microbiota subcommunities")
+
+
+mb_preMTZ |> 
+  filter(!(subcommunity %in% c("I","V", "VI"))) |> 
+  ggplot(aes(x = RACEGR2, y = prop, col = RACEGR2, fill = RACEGR2)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+  geom_jitter(size = 0.25, width = 0.1) +
+  facet_grid(. ~ subcommunity, scales = "free_y") +
+  ylab("proportion") +
+  scale_x_discrete("", breaks = NULL) +
+  scale_color_manual("", values = c("purple", "goldenrod4", "steelblue1")) + 
+  scale_fill_manual("", values = c("purple", "goldenrod4", "steelblue1")) +
+  labs(subtitle = "pre-MTZ microbiota subcommunities")
+
+
+shannon_preMTZ <- 
+  get_assay_wide_format(mae, "tax_16S_p") |> 
+  filter(AVISITN == 0, !is.na(ARM)) |> 
+  mutate(shannon = vegan::diversity(assay)) |> 
+  select(USUBJID, shannon, AVISITN, everything())
+
+shannon_preMTZ |> 
+  ggplot(aes(x = RACEGR2, y = shannon, col = RACEGR2, fill = RACEGR2)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+  geom_jitter(size = 0.5, width = 0.1) +
+  scale_x_discrete("", breaks = NULL) +
+  scale_color_manual("", values = c("purple", "goldenrod4", "steelblue1")) + 
+  scale_fill_manual("", values = c("purple", "goldenrod4", "steelblue1")) +
+  ylab("Shannon index on taxa prop.") +
+  labs(subtitle = "pre-MTZ microbiota alpha diversity") 
+
+
+lm(shannon ~ RACEGR2, data = shannon_preMTZ) |> summary()
+
+```
+
+
+#### Cytokines
+
+
+```{r}
+
+cytokines_long_preMTZ <- 
+  bind_rows(
+     get_assay_long_format(
+      mae, "cytokine_log10_incl_cytokine", feature_name = "cytokine", values_name = "value"
+    ) |> mutate(type = "log"),
+     get_assay_long_format(
+      mae, "cytokine_log10_SE_corrected_incl_cytokine", feature_name = "cytokine", values_name = "value"
+    ) |> mutate(type = "transformed"),
+    get_assay_long_format(
+      mae, "cytokine_residuals", feature_name = "cytokine", values_name = "value"
+    ) |> mutate(type = "residuals")
+  ) |>  
+  mutate(type = type |> fct_inorder()) |> 
+  filter(AVISITN == 0) |> 
+  select(type, cytokine, value, USUBJID, AVISITN, Barcode, everything())
+
+
+```
+
+
+```{r}
+
+cytokines_long_preMTZ |> 
+  ggplot(aes(x = RACEGR2, y = value, col = RACEGR2, fill = RACEGR2)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+  geom_jitter(size = 0.25) +
+  facet_grid(type ~ cytokine, scales = "free_y") +
+  scale_x_discrete("", breaks = NULL) +
+  scale_color_discrete("") + scale_fill_discrete("") +
+  ggtitle("pre-MTZ cytokine")
+
+cytokines_long_preMTZ |> 
+  group_by(type, cytokine) |> 
+  reframe(res = lm(value ~ RACEGR2) |> broom::tidy()) |> 
+  unnest(res) |> 
+  group_by(type, term) |> 
+  mutate(p.value_adj = p.adjust(p.value, method = "BH")) |>
+  ungroup() |> 
+  filter(term == "RACEGR2White") 
+
+cytokines_long_preMTZ |> 
+  group_by(type, cytokine) |> 
+  summarize(anova_pval = lm(value ~ RACEGR2) |> anova() |> extract2("Pr(>F)") |> extract(1)) |> 
+  mutate(anova_pval_adj = p.adjust(anova_pval, method = "BH")) 
+
+
+```
+
+
+
+```{r}
+
+
+cytokines_long_preMTZ |> 
+  ggplot(aes(x = EDULVL, y = value, col = EDULVL, fill = EDULVL)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+  geom_jitter(size = 0.25) +
+  facet_grid(type ~ cytokine, scales = "free_y") +
+  scale_x_discrete("", breaks = NULL) +
+  scale_color_discrete("") + scale_fill_discrete("") +
+  ggtitle("pre-MTZ cytokine")
+
+
+cytokines_long_preMTZ |> 
+  ggplot(aes(x = EDULVL |> as.numeric(), y = value)) +
+  geom_point(size = 0.25) +
+  geom_smooth(method = "lm") +
+  facet_grid(type ~ cytokine, scales = "free_y") +
+  scale_x_discrete("", breaks = NULL) +
+  scale_color_discrete("") + scale_fill_discrete("") +
+  ggtitle("pre-MTZ cytokine")
+
+
+cytokines_long_preMTZ |> 
+  group_by(type, cytokine) |> 
+  reframe(res = lm(value ~ EDULVL |> as.numeric()) |> broom::tidy()) |> 
+  unnest(res) |> 
+  filter(term == "as.numeric(EDULVL)") |> 
+  group_by(type) |> 
+  mutate(p.value_adj = p.adjust(p.value, method = "BH")) |>
+  ungroup() 
+
+```
+
+
+```{r}
+
+df_c <- 
+  cytokines_long_preMTZ |> 
+  filter(type == "residuals") |> 
+  select(cytokine, value, USUBJID) |> 
+  pivot_wider(names_from = cytokine, values_from = value) |> 
+  arrange(USUBJID) |> 
+  as.data.frame() |> column_to_rownames("USUBJID")
+
+df_dem <- 
+   cytokines_long_preMTZ |> 
+  filter(type == "residuals") |> 
+  select(USUBJID, RACEGR2, EDULVL) |>
+  distinct() |> 
+  mutate(tmp = 1) |> 
+  pivot_wider(id_cols = c(USUBJID, EDULVL), names_from = RACEGR2, values_from = tmp, values_fill = 0) |> 
+  mutate(EDULVL = EDULVL |> as.numeric()) |> 
+  arrange(USUBJID) |> 
+  as.data.frame() |> column_to_rownames("USUBJID")
+
+RV.randtest(df_c, df_dem, nrepet = 1000)
+
+```
+
+
+
+
+
+```{r}
+
+df <- 
+  cytokines_long_preMTZ |> 
+  left_join(shannon_preMTZ |> select(Barcode, shannon), by = join_by(Barcode))
+
+g <- 
+  df |> 
+  filter(cytokine == "IP-10", type == "transformed") |> 
+  ggplot(aes(x = value, y = shannon, col = RACEGR2)) +
+  ggtitle("IP-10") +
+  geom_point() # + geom_smooth(method = "lm", aes(fill = RACEGR2)) 
+
+ggExtra::ggMarginal(g, type = "boxplot", groupColour = TRUE, groupFill = TRUE)
+
+```
+
+
+
+
+
+
+### Predicting post-MTZ characteristics (load, alpha-diversity, and pH) from pre-MTZ characteristics
+
+(In all participants to have more power)
+
+#### Output
+
+```{r}
+
+PID <- clin$USUBJID |> unique()
+Y_list <- get_prev_visit_environment(mae, PID, target_visits = 2)
+Y <- Y_list$data
+Y <- Y |> set_rownames(rownames(Y) |> str_remove("_2"))
+Y <- tibble(USUBJID = rownames(Y), response = Y)
+Y <- Y |> filter(!is.na(response$pH), !is.na(response$`α diversity`), !is.na(response$`log10(bact. load)`))
+
+```
+
+#### Microbiota
+
+```{r}
+
+mb_preMTZ <- 
+  get_assay_wide_format(mae, "c_topics_16S_8") |> 
+  filter(AVISITN == 0, !is.na(RACEGR2), !is.na(EDULVL), !is.na(pH), !is.na(assay[,1])) |> 
+  dplyr::rename(preMTZ_topic = assay) |> 
+  mutate(
+    preMTZ_topic = 
+      preMTZ_topic |> 
+      as.data.frame() |> 
+      set_rownames(USUBJID) |> 
+      set_colnames(SummarizedExperiment::rowData(mae[["c_topics_16S_8"]])$topic_label)
+    ) |>
+  select(USUBJID, RACEGR2, EDULVL, pH, preMTZ_topic)
+
+shannon_preMTZ <- 
+  get_assay_wide_format(mae, "tax_16S_p") |> 
+  filter(AVISITN == 0, !is.na(ARM)) |> 
+  mutate(preMTZ_shannon = vegan::diversity(assay)) |> 
+  select(USUBJID, preMTZ_shannon)
+
+```
+
+#### Cytokines
+
+```{r}
+
+cytokine_preMTZ <- 
+   get_assay_wide_format(mae, "cytokine_residuals") |> 
+  filter(AVISITN == 0, !is.na(RACEGR2), !is.na(assay$MIG)) |> 
+  dplyr::rename(preMTZ_cytokine_r = assay) |> 
+  mutate(preMTZ_cytokine_r = preMTZ_cytokine_r |> as.data.frame() |> set_rownames(USUBJID)) |>
+  select(USUBJID, preMTZ_cytokine_r)
+
+```
+
+
+#### Merge
+
+```{r}
+
+XY <- 
+  mb_preMTZ |> 
+  inner_join(shannon_preMTZ, by = join_by(USUBJID)) |> 
+  inner_join(cytokine_preMTZ, by = join_by(USUBJID)) |>
+  inner_join(Y, by = join_by(USUBJID)) 
+
+```
+
+
+#### Predictions
+
+```{r}
+
+dudiY <- dudi.pca(XY$response, scannf = FALSE, nf = 3)
+ktabX <- 
+  ktab.list.df(
+    list(
+      preMTZ_topic = XY$preMTZ_topic |> as.data.frame() |> set_rownames(XY$USUBJID),
+      preMTZ_cytokine_r = XY$preMTZ_cytokine_r |> as.data.frame() |> set_rownames(XY$USUBJID),
+      preMTZ_vag_env = XY |> select(pH, preMTZ_shannon) |> as.data.frame() |> set_rownames(XY$USUBJID),
+      demographics = 
+        XY |> 
+        mutate(race = RACEGR2 |> fct_relevel("Other", after = 1L) |> as.numeric(), education = EDULVL |> as.numeric()) |> 
+        select(race, education) |> as.data.frame() |> set_rownames(XY$USUBJID)
+    )
+  )
+
+res_mbpls <- mbpls(dudiY = dudiY, ktabX = ktabX, scale = TRUE, option = "uniform", scannf = FALSE, nf = 3)
+
+```
+
+
+```{r}
+
+plot_mtb_relbipc(res_mbpls)
+plot_mtb_vipc(res_mbpls)
+plot_mtb_Xloadings(res_mbpls)
+plot_mtb_lY(res_mbpls)
+plot_mtb_lX(res_mbpls)
+plot_mtb_eig(res_mbpls)
+
+
+
+```
+
+
+
+```{r}
+
+XY |> 
+  ggplot(aes(x = RACEGR2, y = response$`log10(bact. load)`)) +
+  geom_boxplot() +
+  geom_point()
+
+lm(response$`log10(bact. load)` ~ RACEGR2, data = XY) |> summary()
+
+```
+
+
+```{r}
+
+XY |> 
+  ggplot(aes(x = preMTZ_cytokine_r$MIG, y = response$`log10(bact. load)`)) +
+ geom_point() +
+  geom_smooth(method = "lm")
+
+lm(response$`log10(bact. load)` ~ preMTZ_cytokine_r$MIG, data = XY) |> summary()
+
+```
+
+```{r}
+
+lm(response$`log10(bact. load)` ~ RACEGR2 + preMTZ_cytokine_r$MIG, data = XY) |> summary()
+
+anova(
+  lm(response$`log10(bact. load)` ~ preMTZ_cytokine_r$MIG, data = XY),
+  lm(response$`log10(bact. load)` ~ RACEGR2 + preMTZ_cytokine_r$MIG, data = XY)
+)
+
+anova(
+  lm(response$`log10(bact. load)` ~ preMTZ_cytokine_r$MIG , data = XY),
+  lm(response$`log10(bact. load)` ~ preMTZ_cytokine_r$MIG + preMTZ_cytokine_r$`IL-1b`, data = XY)
+)
+
+anova(
+  lm(response$`log10(bact. load)` ~ preMTZ_cytokine_r$MIG + preMTZ_cytokine_r$`IL-1b`, data = XY),
+  lm(response$`log10(bact. load)` ~ RACEGR2 + preMTZ_cytokine_r$MIG + preMTZ_cytokine_r$`IL-1b`, data = XY)
+)
+
+
+```
+
+
+
+
+```{r}
+
+XY |> 
+  ggplot(aes(x = preMTZ_shannon, y = response$`log10(bact. load)`)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+lm(response$`log10(bact. load)` ~ preMTZ_shannon, data = XY) |> summary()
+
+```
+
+
+
+```{r}
+
+XY |> 
+  ggplot(aes(x = preMTZ_topic$`Ca. L. v. (BVAB1) topic`, y = response$`log10(bact. load)`)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+lm(response$`log10(bact. load)` ~ preMTZ_topic$`Ca. L. v. (BVAB1) topic`, data = XY) |> summary()
+
+```
+
+
+
+
+
+```{r}
+
+XY |> 
+  ggplot(aes(x = preMTZ_shannon, y = response$pH)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+lm(response$pH ~ preMTZ_shannon, data = XY) |> summary()
+
+
+XY |> 
+  ggplot(aes(x = preMTZ_shannon, y = response$`α diversity`)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+lm(response$`α diversity` ~ preMTZ_shannon, data = XY) |> summary()
+
+
+
+```
+
+
+```{r}
+
+
+RV.randtest(df1 = XY$response, df2 = XY$preMTZ_topic, nrepet = 1000)
+
+RV.randtest(df1 = XY$response, df2 = XY$preMTZ_cytokine_r, nrepet = 1000)
+
+```
+
+
+### Behavioral variables throughout the trial
+
+#### Stability throughout the trial & correlation with past colonization status
+
+
+```{r}
+
+df_long <- 
+  bind_rows(
+    mod_week4$inputs_raw$`Sexual behavior` |> rownames_to_column("key"),
+    mod_week8_and_12$inputs_raw$`Sexual behavior` |> rownames_to_column("key"),
+    mod_week24$inputs_raw$`Sexual behavior` |> rownames_to_column("key")
+  ) |> 
+  left_join(
+    bind_rows(
+      mod_week4$inputs_raw$`Coloniz. cat. prev. v.` |> rownames_to_column("key"),
+      mod_week8_and_12$inputs_raw$`Coloniz. cat. prev. v.` |> rownames_to_column("key"),
+      mod_week24$inputs_raw$`Coloniz. cat. prev. v.` |> rownames_to_column("key")
+    ),
+    by = join_by(key)
+  ) |> 
+  mutate(PID = str_remove(key, "_.*"), target_visit = str_remove(key, ".*_")) |> 
+  select(-key) |> 
+  pivot_longer(
+    cols = c(`Any condom sex`, `Any condomless sex`, `N new partners`), 
+    names_to = "behavior", values_to = "value"
+  ) |> 
+  pivot_longer(
+    cols = c(`≥ 50% L. crispatus`, `≥ 50% Lactobacillus, < 50% L. crispatus`, `< 50% Lactobacillus`),
+    names_to = "colonization_status", values_to = "v"
+  ) |> 
+  filter(v == 1) |> select(-v)
+
+df_wide <- df_long |>
+  select(-colonization_status) |>
+  pivot_wider(names_from = target_visit, values_from = value, names_prefix = "V") 
+
+df_wide |> 
+  ggplot(aes(x = V2, y = V3)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  facet_wrap(. ~ behavior, scales = "free") +
+
+df_wide |> 
+  ggplot(aes(x = V3, y = V4)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  facet_wrap(. ~ behavior, scales = "free") +
+
+df_wide |> 
+  ggplot(aes(x = V4, y = V7)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  facet_wrap(. ~ behavior, scales = "free") +
+  
+  plot_layout(nrow = 3)
+
+df_long |> 
+  mutate(
+    bscore = 
+      case_when(behavior == "Any condom sex" ~ 1, behavior == "Any condomless sex" ~ -1, TRUE ~ 0)
+    ) |>
+  group_by(PID) |>  mutate(total = sum((value != 0)*bscore)) |> ungroup() |> 
+  arrange(behavior, total) |> mutate(PID = PID |> fct_inorder()) |> 
+  ggplot(aes(x = target_visit, y = PID, fill = value == 0)) +
+  geom_tile() +
+  facet_grid(. ~ behavior)
+
+df_long |> 
+  ggplot(aes(x = colonization_status, y = value, col = colonization_status)) +
+  geom_jitter(height = 0.2, width = 0.2, size = 0.5) +
+  facet_grid(behavior ~ target_visit, scales = "free_y")
+
+any_sex <- 
+  df_long |> 
+  filter(behavior != "N new partners", target_visit != 2) |>
+  group_by(PID, target_visit, colonization_status) |>
+  summarize(value = max(value), .groups = "drop")
+
+glm(value ~ colonization_status, data = any_sex, family = "binomial") |> summary()
+
+```
+
+
+
+```{r}
+
+df_long <- 
+  bind_rows(
+    mod_week4$inputs_raw$Adherence |> rownames_to_column("key"),
+    mod_week8_and_12$inputs_raw$Adherence |> rownames_to_column("key"),
+  ) |> 
+  left_join(
+    bind_rows(
+      mod_week4$inputs_raw$`Coloniz. cat. prev. v.` |> rownames_to_column("key"),
+      mod_week8_and_12$inputs_raw$`Coloniz. cat. prev. v.` |> rownames_to_column("key")
+    ),
+    by = join_by(key)
+  ) |> 
+  mutate(PID = str_remove(key, "_.*"), target_visit = str_remove(key, ".*_")) |> 
+  select(-key, -`Days since last dose`) |>
+  pivot_longer(cols = c(`≥ 50% L. crispatus`, `≥ 50% Lactobacillus, < 50% L. crispatus`, `< 50% Lactobacillus`),
+               names_to = "colonization_status", values_to = "v") |> 
+  filter(v == 1) |> select(-v) 
+
+df_wide <- df_long |>
+  select(-colonization_status) |>
+  pivot_wider(names_from = target_visit, values_from = `N missed doses`, names_prefix = "V") 
+
+df_wide |> 
+  ggplot(aes(x = V2, y = V3)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm") +
+
+df_wide |> 
+  ggplot(aes(x = V3, y = V4)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm") +
+
+  plot_layout(nrow = 1)
+
+df_long |> 
+  group_by(PID) |>  mutate(total = sum(`N missed doses`)) |> ungroup() |> 
+  arrange(total) |> mutate(PID = PID |> fct_inorder()) |> 
+  ggplot(aes(x = target_visit, y = PID, fill = `N missed doses`)) +
+  geom_tile()
+
+df_long |> 
+  ggplot(aes(x = colonization_status, y = `N missed doses`, col = colonization_status)) +
+  geom_jitter(height = 0.2, width = 0.2, size = 0.5) +
+  facet_grid(. ~ target_visit, scales = "free_y")
+
+lm(`N missed doses` ~ colonization_status, data = df_long) |> summary()
+
+```
+
+
+### Follow-up period
+
+
+```{r}
+
+df <- 
+  mod_week24$inputs_raw |> map(~ .x) |> bind_cols() |> 
+  rownames_to_column("id") |> as_tibble() |> 
+  mutate(
+    outcome = mod_week24_min$output_fct,
+    week12 = 
+      case_when(
+        `≥ 50% L. crispatus` == 1 ~ "≥ 50% L. crispatus",
+        `≥ 50% Lactobacillus, < 50% L. crispatus` == 1 ~ "≥ 50% Lactobacillus",
+        `< 50% Lactobacillus` == 1 ~ "< 50% Lactobacillus",
+        TRUE ~ "Other"
+      ) |> factor(levels = levels(outcome))
+    ) |> 
+  select(id, week12, outcome, everything())
+
+df |> 
+  ggplot(aes(x = outcome, col = outcome, y = `α diversity (pre-MTZ)`)) +
+  # geom_boxplot(varwidth = TRUE, outlier.shape = NA) +
+  geom_jitter(height = 0, width = 0.1, size = 0.5) +
+  facet_grid(. ~ week12)
+
+
+df |> 
+  ggplot(aes(x = outcome, col = outcome, y = `pH (pre-MTZ)`)) +
+  # geom_boxplot(varwidth = TRUE, outlier.shape = NA) +
+  geom_jitter(height = 0, width = 0.1, size = 0.5) +
+  facet_grid(. ~ week12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+df |> 
+  ggplot(aes(x = outcome, col = outcome, y = `Any condom sex`)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 3) +
+  facet_grid(. ~ week12)
+
+
+df |> 
+  ggplot(aes(x = outcome, col = outcome, y = `Any condomless sex`)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 3) +
+  facet_grid(. ~ week12)
+
+
+df |> 
+  ggplot(aes(x = outcome, col = outcome, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 3) +
+  facet_grid(. ~ week12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+df |> 
+  ggplot(aes(x = outcome, col = outcome, y = `N new partners`)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 3) +
+  facet_grid(. ~ week12)
+
+
+df |> 
+  ggplot(aes(x = outcome, col = outcome, y = `N vag. abx.`)) +
+  geom_jitter(height = 0.1, width = 0.1, size = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 3) +
+  facet_grid(. ~ week12)
+
+# tmp <- 
+#   df |> 
+#   filter(week12 == "≥ 50% Lactobacillus, < 50% L. crispatus", outcome != "≥ 50% Lactobacillus, < 50% L. crispatus") |>
+#   mutate(get = outcome == "≥ 50% L. crispatus") 
+# 
+# glm(get ~ `α diversity (pre-MTZ)`, data = tmp,  family = "binomial") |> summary()
+# 
+# glm(get ~ `pH (pre-MTZ)`, data = tmp,  family = "binomial") |> summary()
+
+
+df |> 
+  ggplot(aes(x = `α diversity (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  geom_jitter(height = 0.1, size = 0.5) +
+  geom_smooth(method = "lm") 
+
+
+df |> 
+  ggplot(aes(x = `pH (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  geom_jitter(height = 0.1, size = 0.5) +
+  geom_smooth(method = "lm") 
+
+
+df |> 
+  ggplot(aes(x = `Ca. L. v. (BVAB1) topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  geom_jitter(height = 0.1, size = 0.5) +
+  geom_smooth(method = "lm") 
+
+
+df |> 
+  ggplot(aes(x = `G. s./l. topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  geom_jitter(height = 0.1, size = 0.5) +
+  geom_smooth(method = "lm") 
+
+
+df |> 
+  ggplot(aes(x = `P. bivia topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  geom_jitter(height = 0.1, size = 0.5) +
+  geom_smooth(method = "lm") 
+
+df |> 
+  ggplot(aes(x = `P. amnii topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  geom_jitter(height = 0.1, size = 0.5) +
+  geom_smooth(method = "lm") 
+
+
+```
+
+
+
+## In the Placebo arm
+
+```{r}
+model_par$arm <- "placebo"
+```
+
+
+
+### From post-MTZ to week 4
+
+```{r}
+model_par$target_visit <- 2
+```
+
+#### Full model
+
+```{r}
+model_par$model <- "full"
+mbplsda_par$opt_ncomp_max <- n_resp_cat - 1
+```
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week4_pl <- mod_res
+```
+
+
+#### Extended model
+
+```{r}
+model_par$model <- "extended"
+mbplsda_par$opt_ncomp_max <- mod_week4_pl$opt_ncomp
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week4_pl_ext <- mod_res
+```
+
+
+#### Reduced model
+
+```{r}
+model_par$model <- "reduced"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week4_pl_red <- mod_res
+```
+
+
+
+#### Minimal model
+
+```{r}
+model_par$model <- "minimal"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week4_pl_min <- mod_res
+```
+
+
+#### Self-predicting
+
+```{r}
+
+mod_week4_pl_self <- self_predicting_model(mod_week4_pl)
+mod_week4_pl_self$cv$summary |> filter(metric == "average F1 score")
+
+```
+
+#### Marginal distributions in explanatory variables
+
+```{r}
+#| fig-width: 15
+#| fig-height: 10
+
+block_colors <- get_block_colors(mod_week4_pl$inputs |> names())
+plot_marginal_inputs(mod_week4_pl) +
+  scale_fill_manual(values = block_colors)
+
+```
+
+#### Output categories distribution
+
+
+
+
+
+
+### From week 4 to week 8 and week 8 to week 12
+
+
+
+```{r}
+model_par$target_visit <- 3
+```
+
+#### Full model
+
+```{r}
+model_par$model <- "full"
+mbplsda_par$opt_ncomp_max <- n_resp_cat - 1
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12_pl <- mod_res
+```
+
+
+
+
+#### Extended model
+
+```{r}
+model_par$model <- "extended"
+mbplsda_par$opt_ncomp_max <- mod_week8_and_12_pl$opt_ncomp
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12_pl_ext <- mod_res
+```
+
+
+#### Reduced model
+
+
+```{r}
+model_par$model <- "reduced"
+```
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12_pl_red <- mod_res
+```
+
+
+#### Minimal model
+
+
+```{r}
+model_par$model <- "minimal"
+```
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week8_and_12_pl_min <- mod_res
+```
+
+
+
+#### Self-predicting model
+
+
+```{r}
+
+mod_week8_and_12_pl_self <- self_predicting_model(mod_week8_and_12_pl)
+mod_week8_and_12_pl_self$cv$summary |> filter(metric == "average F1 score")
+
+```
+
+
+#### Marginal distributions in explanatory variables
+
+```{r}
+#| fig-width: 15
+#| fig-height: 10
+
+block_colors <- get_block_colors(mod_week8_and_12_pl$inputs |> names())
+plot_marginal_inputs(mod_week8_and_12_pl) +
+  scale_fill_manual(values = block_colors)
+
+```
+
+### From week 12 to week 24
+
+```{r}
+model_par$target_visit <- 7
+```
+
+#### Full model
+
+```{r}
+model_par$model <- "full"
+mbplsda_par$opt_ncomp_max <- n_resp_cat - 1
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24_pl <- mod_res
+```
+
+
+#### Extended model
+
+```{r}
+model_par$model <- "extended"
+mbplsda_par$opt_ncomp_max <- mod_week24_pl$opt_ncomp
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24_pl_ext <- mod_res
+```
+
+
+
+#### Reduced model
+
+```{r}
+model_par$model <- "reduced"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24_pl_red <- mod_res
+```
+
+
+#### Minimal model
+
+```{r}
+model_par$model <- "minimal"
+```
+
+
+```{r}
+mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 25
+plot_mbplsda_outputs(mod_res = mod_res)
+```
+
+```{r}
+get_mtb_relbipc_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+plot_mtb_coef(res = mod_res$res, boot = mod_res$boot) +
+  scale_color_manual(values =  get_block_colors(mod_res$inputs |> names()))
+```
+
+```{r}
+get_mtb_coefs_table(res = mod_res$res, boot = mod_res$boot)
+```
+
+```{r}
+mod_week24_pl_min <- mod_res
+```
+
+
+#### Self-predicting model
+
+
+```{r}
+
+mod_week24_pl_self <- self_predicting_model(mod_week24_pl)
+mod_week24_pl_self$cv$summary |> filter(metric == "average F1 score")
+
+```
+
+#### Marginal distributions in explanatory variables
+
+```{r}
+#| fig-width: 15
+#| fig-height: 10
+
+block_colors <- get_block_colors(mod_week24_pl$inputs |> names())
+plot_marginal_inputs(mod_week24_pl) +
+  scale_fill_manual(values = block_colors)
+
+```
+
+### Comparing models
+
+```{r}
+
+block_colors <- get_block_colors(mod_week4_pl$inputs |> names())
+block_colors_ext <- get_block_colors(mod_week4_pl_ext$inputs |> names())
+block_colors_red <- get_block_colors(mod_week4_pl_red$inputs |> names())
+block_colors_min <- get_block_colors(mod_week4_pl_min$inputs |> names())
+
+
+```
+
+
+#### Full vs nested models
+
+```{r}
+
+accuracies <- 
+  bind_rows(
+    tibble(Phase = w4_phase, type = "Full", Accuracy = get_accuracy(mod_week4_pl)),
+    tibble(Phase = w4_phase, type = "Extended", Accuracy = get_accuracy(mod_week4_pl_ext)),
+    tibble(Phase = w4_phase, type = "Reduced", Accuracy = get_accuracy(mod_week4_pl_red)),
+    tibble(Phase = w4_phase, type = "Minimal", Accuracy = get_accuracy(mod_week4_pl_min)),
+    tibble(Phase = w4_phase, type = "Self-predicting", Accuracy = get_accuracy_seld(mod_week4_pl_self)),
+    
+    tibble(Phase = w8_12_phase, type = "Full", Accuracy = get_accuracy(mod_week8_and_12_pl)),
+    tibble(Phase = w8_12_phase, type = "Extended", Accuracy = get_accuracy(mod_week8_and_12_pl_ext)),
+    tibble(Phase = w8_12_phase, type = "Reduced", Accuracy = get_accuracy(mod_week8_and_12_pl_red)),
+    tibble(Phase = w8_12_phase, type = "Minimal", Accuracy = get_accuracy(mod_week8_and_12_pl_min)),
+    tibble(Phase = w8_12_phase, type = "Self-predicting", Accuracy = get_accuracy_seld(mod_week8_and_12_pl_self)),
+    
+    tibble(Phase = w24_phase, type = "Full", Accuracy = get_accuracy(mod_week24_pl)),
+    tibble(Phase = w24_phase, type = "Extended", Accuracy = get_accuracy(mod_week24_pl_ext)),
+    tibble(Phase = w24_phase, type = "Reduced", Accuracy = get_accuracy(mod_week24_pl_red)),
+    tibble(Phase = w24_phase, type = "Minimal", Accuracy = get_accuracy(mod_week24_pl_min)),
+    tibble(Phase = w24_phase, type = "Self-predicting", Accuracy = get_accuracy_seld(mod_week24_pl_self))
+  ) |> 
+  mutate(Phase = Phase |> fct_inorder(), type = type |> fct_inorder() |> fct_rev())
+
+accuracies |> 
+  ggplot(aes(x = type, y = Accuracy)) +
+  geom_col() +
+  facet_grid(. ~ Phase) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("") 
+
+```
+
+
+```{r}
+
+opt_ncomp <- 3
+
+bind_rows(
+  get_f1(mod_week4_pl) |> mutate(Model = "Full", phase = w4_phase),
+  get_f1(mod_week4_pl_ext) |> mutate(Model = "Extended", phase = w4_phase),
+  get_f1(mod_week4_pl_red) |> mutate(Model = "Reduced", phase = w4_phase),
+  get_f1(mod_week4_pl_min) |> mutate(Model = "Minimal", phase = w4_phase),
+  
+  get_f1(mod_week8_and_12_pl) |> mutate(Model = "Full", phase = w8_12_phase),
+  get_f1(mod_week8_and_12_pl_ext) |> mutate(Model = "Extended", phase = w8_12_phase),
+  get_f1(mod_week8_and_12_pl_red) |> mutate(Model = "Reduced", phase = w8_12_phase),
+  get_f1(mod_week8_and_12_pl_min) |> mutate(Model = "Minimal", phase = w8_12_phase),
+  
+  get_f1(mod_week24_pl) |> mutate(Model = "Full", phase = w24_phase),
+  get_f1(mod_week24_pl_ext) |> mutate(Model = "Extended", phase = w24_phase),
+  get_f1(mod_week24_pl_red) |> mutate(Model = "Reduced", phase = w24_phase),
+  get_f1(mod_week24_pl_min) |> mutate(Model = "Minimal", phase = w24_phase)
+) |> 
+  mutate(
+    Model = Model |> fct_inorder() |> fct_rev(), 
+    phase = phase |> str_replace("\\(", "\n\\(") |> fct_inorder()
+    ) |>
+  ggplot(aes(x = Model, y = F1, col = set, fill = set)) +
+  geom_boxplot(alpha = 0.5, outlier.size = 0.5) +
+  facet_grid(phase ~ true_class, scales = "free_y") +
+  scale_color_manual("", values = c("calibration" = "black", "validation" = "turquoise3", "random permutation" = "gray")) +
+  scale_fill_manual("", values = c("calibration" = "black", "validation" = "turquoise3", "random permutation" = "gray")) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) 
+
+
+```
+
+
+```{r}
+
+sel_metric <- "average F1 score"
+
+plot_models_cv(
+  full = mod_week4_pl, ext = mod_week4_pl_ext, red = mod_week4_pl_red, 
+  min = mod_week4_pl_min, self = mod_week4_pl_self,
+  opt_ncomp = 1, selected_metric = sel_metric
+  ) + 
+  ggtitle("Initial phase", subtitle = "from post-MTZ to week 4") + guides(col = "none") +
+  plot_models_cv(
+    full = mod_week8_and_12_pl, ext = mod_week8_and_12_pl_ext, red = mod_week8_and_12_pl_red, 
+    min = mod_week8_and_12_pl_min, self = mod_week8_and_12_pl_self, 
+    opt_ncomp = mod_week8_and_12_pl$opt_ncomp, selected_metric = sel_metric
+    ) +
+  ggtitle("Continuation phase", subtitle = "from week 4 to week 8 and 12") + guides(col = "none") +
+  plot_models_cv(
+    full = mod_week24_pl, ext = mod_week24_pl_ext, red = mod_week24_pl_red, 
+    min = mod_week24_pl_min, self = mod_week24_pl_self, 
+    opt_ncomp = mod_week24_pl$opt_ncomp, selected_metric = sel_metric
+    ) + 
+  ggtitle("Follow-up phase", subtitle = "from week 12 to week 24") + guides(col = "none")
+
+
+
+```
+
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 15
+
+
+plot_confusion_matrix(mod_week4_pl$output_fct, pred_outcomes = mod_week4_pl$predictions$pred_fct) + 
+  ggtitle("post-MTZ to week 4", subtitle = "Full model") + 
+  
+plot_confusion_matrix(mod_week4_pl_ext$output_fct, pred_outcomes = mod_week4_pl_ext$predictions$pred_fct) +
+  ggtitle("", subtitle = "Extended model") +
+  
+plot_confusion_matrix(mod_week4_pl_red$output_fct, pred_outcomes = mod_week4_pl_red$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Reduced model") +
+  
+plot_confusion_matrix(mod_week4_pl_min$output_fct, pred_outcomes = mod_week4_pl_min$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Minimal model") +
+  
+  
+  
+plot_confusion_matrix(mod_week8_and_12_pl$output_fct, pred_outcomes = mod_week8_and_12_pl$predictions$pred_fct) + 
+  ggtitle("Week 4 to week 8 and 12", subtitle = "Full model") + 
+  
+plot_confusion_matrix(mod_week8_and_12_pl_ext$output_fct, pred_outcomes = mod_week8_and_12_pl_ext$predictions$pred_fct) +
+  ggtitle("", subtitle = "Extended model") +
+  
+plot_confusion_matrix(mod_week8_and_12_pl_red$output_fct, pred_outcomes = mod_week8_and_12_pl_red$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Reduced model") +
+  
+  
+plot_confusion_matrix(mod_week8_and_12_pl_min$output_fct, pred_outcomes = mod_week8_and_12_pl_min$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Minimal model") +
+  
+  
+  
+plot_confusion_matrix(mod_week24_pl$output_fct, pred_outcomes = mod_week24_pl$predictions$pred_fct) + 
+  ggtitle("Week 12 to week 24", subtitle = "Full model") + 
+  
+plot_confusion_matrix(mod_week24_pl_ext$output_fct, pred_outcomes = mod_week24_pl_ext$predictions$pred_fct) +
+  ggtitle("", subtitle = "Extended model") +
+  
+plot_confusion_matrix(mod_week24_pl_red$output_fct, pred_outcomes = mod_week24_pl_red$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Reduced model") +
+  
+plot_confusion_matrix(mod_week24_pl_min$output_fct, pred_outcomes = mod_week24_pl_min$predictions$pred_fct) + 
+  ggtitle("", subtitle = "Minimal model") +
+
+  plot_layout(guides = "collect", nrow = 4, byrow = FALSE)
+
+```
+
+#### Blocks
+
+
+```{r}
+#| fig-width: 7
+#| fig-height: 12
+
+plot_mtb_cov(mod_week4_pl$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("post-MTZ to week 4") + 
+plot_mtb_cov(mod_week8_and_12_pl$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("From week 4 to 8 to 12") +
+plot_mtb_cov(mod_week24_pl$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("From week 12 to 24") +
+  plot_layout(guides = "collect", nrow = 3)
+
+```
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week4_pl$res, boot = mod_week4_pl$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Initial phase", subtitle = "post-MTZ to week 4") + 
+  
+plot_mtb_relbipc(mod_week8_and_12_pl$res, boot = mod_week8_and_12_pl$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Continuation phase", subtitle = "From week 4 to 8 to 12") +
+  
+plot_mtb_relbipc(mod_week24_pl$res, boot = mod_week24_pl$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Follow-up phase", subtitle = "From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week4_pl_red$res, boot = mod_week4_pl_red$boot) + 
+  geom_vline(xintercept = c(4.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors_red) + 
+  ggtitle("Initial phase", subtitle = "post-MTZ to week 4") + 
+  
+plot_mtb_relbipc(mod_week8_and_12_pl_red$res, boot = mod_week8_and_12_pl_red$boot) + 
+  geom_vline(xintercept = c(4.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors_red) + 
+  ggtitle("Continuation phase", subtitle = "From week 4 to 8 to 12") +
+  
+plot_mtb_relbipc(mod_week24_pl_red$res, boot = mod_week24_pl_red$boot) + 
+  geom_vline(xintercept = c(4.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors_red) + 
+  ggtitle("Follow-up phase", subtitle = "From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week4_pl_min$res, boot = mod_week4_pl_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  ggtitle("Initial phase", subtitle = "post-MTZ to week 4") + 
+  
+plot_mtb_relbipc(mod_week8_and_12_pl_min$res, boot = mod_week8_and_12_pl_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  ggtitle("Continuation phase", subtitle = "From week 4 to 8 to 12") +
+  
+plot_mtb_relbipc(mod_week24_pl_min$res, boot = mod_week24_pl_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  ggtitle("Follow-up phase", subtitle = "From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+#### Scores & Loadings
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 6
+
+plot_mtb_Xloadings(mod_week4_pl$res) + scale_color_manual(values = block_colors) + ggtitle("post-MTZ to week 4") + 
+plot_mtb_Xloadings(mod_week8_and_12_pl$res) + scale_color_manual(values = block_colors)  + ggtitle("From week 4 to 8 to 12") +
+plot_mtb_Xloadings(mod_week24_pl$res) + scale_color_manual(values = block_colors)  + ggtitle("From week 12 to 24") +
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4.5
+
+plot_mtb_Xloadings(mod_week4_pl$res, boot = mod_week4_pl$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week4_pl$inputs), values = block_colors) + 
+  guides(col = "none") + ggtitle("From post-MTZ to week 4") + 
+  
+plot_mtb_Xloadings(mod_week8_and_12_pl$res, boot = mod_week8_and_12_pl$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week8_and_12_pl$inputs), values = block_colors) + 
+  guides(col = "none") + ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_Xloadings(mod_week24_pl$res, boot = mod_week24_pl$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week24_pl$inputs), values = block_colors) + 
+  guides(col = "none") + ggtitle("From week 12 to 24")
+
+```
+```{r}
+#| fig-width: 15
+#| fig-height: 4.5
+
+plot_mtb_Xloadings(mod_week4_pl_red$res, boot = mod_week4_pl_red$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week4_pl_red$inputs), values = block_colors_red) + 
+  guides(col = "none") + ggtitle("From post-MTZ to week 4", subtitle = "Reduced model") + 
+  
+plot_mtb_Xloadings(mod_week8_and_12_pl_red$res, boot = mod_week8_and_12_pl_red$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week8_and_12_pl_red$inputs), values = block_colors_red) + 
+  guides(col = "none") + ggtitle("From week 4 to 8 to 12", subtitle = "Reduced model") +
+  
+plot_mtb_Xloadings(mod_week24_pl_red$res, boot = mod_week24_pl_red$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week24_pl_red$inputs), values = block_colors_red) + 
+  guides(col = "none") + ggtitle("From week 12 to 24", subtitle = "Reduced model")
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4.5
+
+plot_mtb_Xloadings(mod_week4_pl_min$res, boot = mod_week4_pl_min$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week4_pl_min$inputs), values = block_colors_min) + 
+  guides(col = "none") + ggtitle("From post-MTZ to week 4", subtitle = "Minimal model") + 
+  
+plot_mtb_Xloadings(mod_week8_and_12_pl_min$res, boot = mod_week8_and_12_pl_min$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week8_and_12_pl_min$inputs), values = block_colors_min) + 
+  guides(col = "none") + ggtitle("From week 4 to 8 to 12", subtitle = "Minimal model") +
+  
+plot_mtb_Xloadings(mod_week24_pl_min$res, boot = mod_week24_pl_min$boot, VIP = TRUE) +
+  scale_color_manual(breaks = names(mod_week24_pl_min$inputs), values = block_colors_min) + 
+  guides(col = "none") + ggtitle("From week 12 to 24", subtitle = "Minimal model")
+
+```
+
+
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4_pl$res, samples_color = mod_week4_pl$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4_pl$output_fct)) +  ggtitle("post-MTZ to week 4") + 
+
+plot_mtb_lX(mod_week8_and_12_pl$res, samples_color = mod_week8_and_12_pl$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12_pl$output_fct)) +  ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_lX(mod_week24_pl$res, samples_color = mod_week24_pl$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24_pl$output_fct)) + ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4_pl_ext$res, samples_color = mod_week4_pl_ext$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4_pl_ext$output_fct)) +  ggtitle("post-MTZ to week 4", subtitle = "Extended model") + 
+
+plot_mtb_lX(mod_week8_and_12_pl_ext$res, samples_color = mod_week8_and_12_pl_ext$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12_pl_ext$output_fct)) +  ggtitle("From week 4 to 8 to 12", subtitle = "Extended model") +
+  
+plot_mtb_lX(mod_week24_pl_ext$res, samples_color = mod_week24_pl_ext$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24_pl_ext$output_fct)) + ggtitle("From week 12 to 24", subtitle = "Extended model") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4_pl_red$res, samples_color = mod_week4_pl_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4_pl_red$output_fct)) +  ggtitle("post-MTZ to week 4", subtitle = "Reduced model") + 
+
+plot_mtb_lX(mod_week8_and_12_pl_red$res, samples_color = mod_week8_and_12_pl_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12_pl_red$output_fct)) +  ggtitle("From week 4 to 8 to 12", subtitle = "Reduced model") +
+  
+plot_mtb_lX(mod_week24_pl_red$res, samples_color = mod_week24_pl_red$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24_pl_red$output_fct)) + ggtitle("From week 12 to 24", subtitle = "Reduced model") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 4
+
+plot_mtb_lX(mod_week4_pl_min$res, samples_color = mod_week4_pl_min$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week4_pl_min$output_fct)) +  ggtitle("post-MTZ to week 4", subtitle = "Minimal model") + 
+
+plot_mtb_lX(mod_week8_and_12_pl_min$res, samples_color = mod_week8_and_12_pl_min$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week8_and_12_pl_min$output_fct)) +  ggtitle("From week 4 to 8 to 12", subtitle = "Minimal model") +
+  
+plot_mtb_lX(mod_week24_pl_min$res, samples_color = mod_week24_pl_min$output_fct, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("I","III", "IV"))) +
+  stat_ellipse(aes(col = mod_week24_pl_min$output_fct)) + ggtitle("From week 12 to 24", subtitle = "Minimal model") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+```{r}
+#| fig-width: 15
+
+plot_mtb_lY(mod_week4_pl$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("post-MTZ to week 4") + 
+
+plot_mtb_lY(mod_week8_and_12_pl$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_lY(mod_week24_pl$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+```{r}
+#| fig-width: 15
+
+plot_mtb_lY(mod_week4_pl_min$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("post-MTZ to week 4") + 
+
+plot_mtb_lY(mod_week8_and_12_pl_min$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +  
+  ggtitle("From week 4 to 8 to 12") +
+  
+plot_mtb_lY(mod_week24_pl_min$res, scale_axes = "eig") +
+  scale_color_manual("", values = get_topic_colors(c("IV","I", "III"))) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+#### Coefficients
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+plot_mtb_coef(mod_week4_pl$res, boot = mod_week4_pl$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12_pl$res, boot = mod_week8_and_12_pl$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24_pl$res, boot = mod_week24_pl$boot) + 
+  scale_color_manual(values = block_colors) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 7
+
+
+plot_mtb_coef(mod_week4_pl_ext$res, boot = mod_week4_pl_ext$boot) + 
+  scale_color_manual(values = block_colors_ext) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12_pl_ext$res, boot = mod_week8_and_12_pl_ext$boot) + 
+  scale_color_manual(values = block_colors_ext) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24_pl_ext$res, boot = mod_week24_pl_ext$boot) + 
+  scale_color_manual(values = block_colors_ext) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 7
+
+
+plot_mtb_coef(mod_week4_pl_red$res, boot = mod_week4_pl_red$boot) + 
+  scale_color_manual(values = block_colors_red) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12_pl_red$res, boot = mod_week8_and_12_pl_red$boot) + 
+  scale_color_manual(values = block_colors_red) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24_pl_red$res, boot = mod_week24_pl_red$boot) + 
+  scale_color_manual(values = block_colors_red) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 7
+
+
+plot_mtb_coef(mod_week4_pl_min$res, boot = mod_week4_pl_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  ggtitle("post-MTZ to week 4") + 
+  
+  plot_mtb_coef(mod_week8_and_12_pl_min$res, boot = mod_week8_and_12_pl_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  theme(strip.text.y = element_blank(), strip.background.y = element_blank()) +
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 4 to 8 to 12") +
+  
+  plot_mtb_coef(mod_week24_pl_min$res, boot = mod_week24_pl_min$boot) + 
+  scale_color_manual(values = block_colors_min) + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("From week 12 to 24") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+
+# Main & Supplementary Tables and Figures
+
+## Main Figure
+
+
+```{r}
+
+relbipc_all <- 
+  bind_rows(
+    get_mtb_relbipc(res = mod_week4$res, boot = mod_week4$boot) |> 
+      mutate(
+        value = rel_BIPC, lo = Q2.5_rel_BIPC, up = Q97.5_rel_BIPC,
+        model = "post-MTZ to week 4"
+      ),
+    get_mtb_relbipc(res = mod_week8_and_12$res, boot = mod_week8_and_12$boot) |> 
+      mutate(
+        value = rel_BIPC, lo = Q2.5_rel_BIPC, up = Q97.5_rel_BIPC,
+        model = "week 4 to 8 to 12"
+      ),
+     get_mtb_relbipc(res = mod_week24$res, boot = mod_week24$boot) |> 
+      mutate(
+        value = rel_BIPC, lo = Q2.5_rel_BIPC, up = Q97.5_rel_BIPC,
+        model = "week 12 to 24"
+      )
+  ) |> 
+  mutate(model = model |> fct_inorder())
+
+g_combined_relbicp <- 
+  relbipc_all |> 
+  ggplot(aes(x = value, y = block |> fct_rev(), color = block)) +
+  geom_vline(xintercept = 1, linetype = 1, col = "gray70") +
+  geom_hline(yintercept = c(12.5, 9.5, 8.5, 5.5), linetype = 3, col = "gray") +
+  geom_segment(aes(x = lo, xend = up, yend = block), linewidth = 1, lineend = "round", alpha = 0.4) +
+  geom_point() +
+  facet_grid(. ~ model, scales = "free_x") +
+  xlab("Relative Cummulative Block Importance") +
+  ylab("") + # scale_x_log10() +
+  guides(col = "none") +
+  theme(panel.grid.major.y = element_blank()) +
+  scale_color_manual(values = get_block_colors(mod_week4$inputs |> names())) 
+
+
+# relbipc_all |> 
+#   ggplot(aes(x = block, y = value, color = block)) +
+#   geom_hline(yintercept = 1, linetype = 1, col = "gray70") +
+#   geom_vline(xintercept = c(1.5, 4.5, 5.5, 9.5), linetype = 3, col = "gray") +
+#   geom_segment(aes(y = lo, yend = up, xend = block), linewidth = 1, lineend = "round", alpha = 0.5) +
+#   geom_point() +
+#   facet_grid(model ~ .) +
+#   xlab("") +
+#   ylab("Relative Cummulative Block Importance") +
+#   guides(col = "none") +
+#   scale_color_manual(values = get_block_colors(mod_week4$inputs |> names())) +
+#   theme(
+#     panel.grid.major.x = element_blank(),
+#     axis.text.x = element_text(angle = 45, hjust = 1)
+#   ) 
+
+```
+
+
+```{r}
+
+block_names <- mod_week4$inputs |> names()
+block_colors <- get_block_colors(block_names)
+g_biplot <- 
+  plot_mtb_biplot(
+  res = mod_week4$res, xaxis = 1, yaxis = 2,  scale_axes = "eig",
+  VIP = TRUE, boot = mod_week4$boot,
+  samples_color = mod_week4$output_fct, 
+  sample_color_scale = 
+    list(name = "", values = get_topic_colors(c("I","III", "IV"))),
+  block_color_scale = 
+    list(name = "", values = block_colors, breaks = block_names),
+  
+  ) +
+  labs(subtitle = "Post-MTZ to week 4 (Initial phase)")
+
+# g_biplot
+
+g_scree <- 
+  plot_mtb_eig(mod_week4$res)[[1]] +
+  ylab("Eig.") +
+  theme(
+    axis.text.x = element_blank(), axis.title.x = element_blank(),
+    axis.text.y = element_blank(),
+    plot.background = element_rect(fill = "white", color = "white")
+    ) 
+# g_scree
+
+```
+
+
+```{r}
+
+
+cytokines <- 
+  get_assay_long_format(
+    mae, "cytokine_transformed", 
+    feature_name = "cytokine", values_name = "transformed_abundances") |> 
+  left_join(
+    get_assay_long_format(
+      mae, "cytokine_residuals", 
+      feature_name = "cytokine", values_name = "residuals") |> 
+      select(Barcode, cytokine, residuals),
+    by = join_by(Barcode, cytokine)
+  ) |> 
+  select(USUBJID, ARM, AVISITN, cytokine, transformed_abundances, residuals, everything())
+
+colonization <- 
+  get_assay_long_format(mae, "mb_categories", values_name = "colonization_status")  |> 
+  mutate(colonization_status = colonization_status |> factor(levels = mod_week4$output_fct |> levels()))
+
+df <- 
+  cytokines |> 
+  filter(PIPV, AVISITN <= 2, !is.na(ARM)) |> 
+  select(Barcode, USUBJID, ARM, AVISITN, cytokine, transformed_abundances, residuals) |> 
+  left_join(
+    colonization |> filter(AVISITN == 2) |> 
+      select(USUBJID, colonization_status) |> 
+      dplyr::rename(week4_status = colonization_status),
+    by = join_by(USUBJID)
+  )
+
+g_cytokines <- 
+  df |> 
+  filter(ARM == "LACTIN-V", cytokine %in% c("MIG", "IL-1b"),
+         !is.na(week4_status)) |> 
+  ggplot(aes(x = week4_status, y = transformed_abundances, 
+             col = week4_status, fill = week4_status)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_jitter(size = 0.5, width = 0.2) +
+  facet_grid(cytokine ~ AVISITN |> get_visit_labels()) +
+  xlab("Colonization category at week 4") +
+  scale_color_manual("", values = get_topic_colors(c("I","III","IV"))) +
+  scale_fill_manual("", values = get_topic_colors(c("I","III","IV"))) +
+  theme(axis.text.x = element_blank()) +
+  ylab("Transformed log2(concentrations)")
+# g_cytokines
+
+
+```
+
+
+```{r}
+#| fig-height: 9.5
+#| fig-width: 13
+#| cache: false
+
+design <- 
+"
+AA
+BC
+"
+
+fig_6 <- 
+  free(g_combined_relbicp) +
+  g_biplot + inset_element(g_scree, left = 0.7, bottom = 0.8, right = 1, top = 1, align_to = "plot") +
+  g_cytokines + guides(fill = "none", col = "none") +
+  plot_layout(ncol = 2, heights = c(1, 2), width = c(4,3), design = design, guides = "collect") +
+  plot_annotation(tag_levels = "A")
+
+fig_6
+  
+```
+
+
+```{r}
+#| cache: false
+
+ggsave(fig_6, filename = str_c(fig_out_dir(), "Fig6.pdf"), width = 13, height = 9.5, device = cairo_pdf)
+
+```
+
+
+
+
+
+## Supplementary table
+
+```{r}
+
+mod_week4_pl$inputs_descr |> group_by(block) |> gt(row_group_as_column = TRUE)
+
+```
+
+
+
+## Supplementary figure 6
+
+A. Schematics of models 
+B. CV for # of components full model of each phase.
+C. CV for each nested model of each phase.
+
+```{r}
+
+
+
+g_schema <- plot_png("images/consecutive_models_nested.png", padding = 20)
+
+g_cv_4 <- plot_cv(mod_week4, selected_metric = "average F1 score")
+g_cv_8_12 <- plot_cv(mod_week8_and_12, selected_metric = "average F1 score")
+g_cv_24 <- plot_cv(mod_week24, selected_metric = "average F1 score")
+
+
+g_models_4 <- 
+  plot_models_cv(
+    full = mod_week4, 
+    ext = mod_week4_ext, 
+    red = mod_week4_red, 
+    min = mod_week4_min, 
+    self = mod_week4_self, 
+    opt_ncomp = mod_week4$opt_ncomp
+    ) + 
+  guides(col = "none") 
+g_models_8_12 <- 
+  plot_models_cv(
+    full = mod_week8_and_12, 
+    ext = mod_week8_and_12_ext, 
+    red = mod_week8_and_12_red, 
+    min = mod_week8_and_12_min, 
+    self = mod_week8_and_12_self, 
+    opt_ncomp = opt_ncomp) + 
+  guides(col = "none") 
+g_models_24 <- 
+  plot_models_cv(
+    full = mod_week24, 
+    ext = mod_week24_ext, 
+    red = mod_week24_red, 
+    min = mod_week24_min, 
+    self = mod_week24_self,  
+    opt_ncomp = opt_ncomp) + 
+  guides(col = "none")
+
+  
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+
+patch_cv <-  
+  g_cv_4 + labs(subtitle = "post-MTZ to week 4 (Initial phase)", tag = "B") +
+  g_cv_8_12 + labs(subtitle = "from week 4 to 8 to 12 (Continuation)") +
+  g_cv_24 + labs(subtitle = "from week 12 to 24 (Follow-up)") +
+  plot_layout(guides = "collect", nrow = 1, widths = c(1,1,1), tag_level = 'new')
+
+patch_nested <- 
+  g_models_4 + labs(subtitle = "post-MTZ to week 4 (Initial phase)", tag = "C") +
+  g_models_8_12 + labs(subtitle = "from week 4 to 8 to 12 (Continuation)") + 
+  g_models_24 + labs(subtitle = "from week 12 to 24 (Follow-up)") +
+  plot_layout(guides = "collect", nrow = 1, widths = c(1,1,1), tag_level = 'new')
+
+g <- 
+g_schema + labs(tag = "A") + 
+  patch_cv + 
+  patch_nested +
+  plot_layout(
+    guides = "collect", nrow = 3, heights = c(1.1,1,1)
+  ) 
+
+g
+
+```
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S6.pdf"), width = 13, height = 13, device = cairo_pdf)
+
+```
+
+
+
+
+
+## Supplementary figure 7A
+
+Coefficients of the full model of each phase.
+
+```{r}
+
+coefs_LV <- 
+  bind_rows(
+    get_mtb_coef(res = mod_week4$res, boot = mod_week4$boot) |> 
+      mutate(phase = "Initial"),
+    get_mtb_coef(res = mod_week8_and_12$res, boot = mod_week8_and_12$boot) |>
+      mutate(phase = "Continuation"),
+    get_mtb_coef(res = mod_week24$res, boot = mod_week24$boot) |>
+      mutate(phase = "Follow-up")
+  ) |> 
+  mutate(
+    Yvar = 
+      Yvar |> 
+      str_replace("rispatus", ".") |> 
+      str_replace("bacillus", ".") |> 
+      str_replace(",","\n")  |> 
+      fct_inorder(),
+    variable = variable |> str_replace("Lactobacillus, < 50% L. crispatus", "Lacto., < 50% L. c.") |> fct_inorder() |> fct_rev(),
+    phase = phase |> fct_inorder(),
+    CI_excludes_0 = ifelse(lo * up > 0, 1, 0)
+  )
+```
+
+
+```{r}
+#| fig-height: 12
+#| fig-width: 13
+
+g <- 
+coefs_LV |>
+  ggplot() +
+  aes(x = value, y = variable, col = Yvar, alpha = CI_excludes_0) +
+  ggh4x::facet_nested(block ~ phase + Yvar, scales = "free_y", space = "free_y") +
+  geom_vline(xintercept = 0, col = "gray50") + 
+  geom_segment(aes(x = lo, xend = up, yend = variable), lineend = "round") + 
+  geom_point() + 
+  xlab("coefficient") +
+  ylab("") + 
+  scale_alpha_continuous(breaks = c(0, 1), range = c(0.2, 1)) +
+  guides(fill = "none", col = "none", alpha = "none") + 
+  theme(strip.text = element_text(color = "black"), 
+        strip.text.y = element_text(angle = 0, hjust = 0)) +
+  scale_color_manual(values = get_topic_colors(c("I","III","IV"))) +
+  ggtitle("Lactin-V arm")
+
+g
+
+```
+
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S7A.pdf"), width = 13, height = 12, device = cairo_pdf)
+
+```
+
+
+
+## Supplementary figure 8
+
+Same as A-C for the placebo arm.
+
+```{r}
+
+g_cv_4_pl <- plot_cv(mod_week4_pl, selected_metric = "average F1 score")
+g_cv_8_12_pl <- plot_cv(mod_week8_and_12_pl, selected_metric = "average F1 score")
+g_cv_24_pl <- plot_cv(mod_week24_pl, selected_metric = "average F1 score")
+
+
+g_models_4_pl <- 
+  plot_models_cv(
+    full = mod_week4_pl, 
+    ext = mod_week4_pl_ext, 
+    red = mod_week4_pl_red, 
+    min = mod_week4_pl_min, 
+    self = mod_week4_pl_self, 
+    opt_ncomp = mod_week4_pl$opt_ncomp
+    ) + 
+  guides(col = "none") 
+g_models_8_12_pl <- 
+  plot_models_cv(
+    full = mod_week8_and_12_pl, 
+    ext = mod_week8_and_12_pl_ext, 
+    red = mod_week8_and_12_pl_red, 
+    min = mod_week8_and_12_pl_min, 
+    self = mod_week8_and_12_pl_self, 
+    opt_ncomp = mod_week8_and_12_pl$opt_ncomp
+    ) + 
+  guides(col = "none") 
+g_models_24_pl <- 
+  plot_models_cv(
+    full = mod_week24_pl, 
+    ext = mod_week24_pl_ext, 
+    red = mod_week24_pl_red, 
+    min = mod_week24_pl_min, 
+    self = mod_week24_pl_self, 
+    opt_ncomp = mod_week24_pl$opt_ncomp
+    ) + 
+  guides(col = "none")
+
+
+bipc_all_pl <- 
+  bind_rows(
+    get_mtb_bipc(res = mod_week4_pl$res, boot = mod_week4_pl$boot) |> 
+      left_join(get_ref_bipc(res = mod_week4_pl$res), by = join_by(block)) |> 
+      mutate(
+        value = value/bipc_ref, lo = lo/bipc_ref, up = up/bipc_ref,
+        model = "post-MTZ to week 4"
+      ),
+    get_mtb_bipc(res = mod_week8_and_12_pl$res, boot = mod_week8_and_12_pl$boot) |>
+      left_join(get_ref_bipc(res = mod_week8_and_12_pl$res), by = join_by(block)) |>
+      mutate(
+        value = value/bipc_ref, lo = lo/bipc_ref, up = up/bipc_ref,
+        model = "week 4 to 8 to 12"
+      ),
+    get_mtb_bipc(res = mod_week24_pl$res, boot = mod_week24_pl$boot) |>
+      left_join(get_ref_bipc(res = mod_week24_pl$res), by = join_by(block)) |>
+      mutate(
+        value = value/bipc_ref, lo = lo/bipc_ref, up = up/bipc_ref,
+        model = "week 12 to 24"
+      )
+  ) |> 
+  mutate(model = model |> fct_inorder())
+
+g_combined_bicp_pl <- 
+  bipc_all_pl |> 
+  ggplot(aes(x = value, y = block |> fct_rev(), color = block)) +
+  geom_vline(xintercept = 1, linetype = 1, col = "gray70") +
+  geom_hline(yintercept = c(12.5, 9.5, 8.5, 5.5), linetype = 3, col = "gray") +
+  geom_segment(aes(x = lo, xend = up, yend = block), linewidth = 1, lineend = "round", alpha = 0.4) +
+  geom_point() +
+  facet_grid(. ~ model, scales = "free_x") +
+  xlab("Relative Cummulative Block Importance") +
+  ylab("") + # scale_x_log10() +
+  guides(col = "none") +
+  theme(panel.grid.major.y = element_blank()) +
+  scale_color_manual(values = get_block_colors(mod_week4$inputs |> names()))  
+
+```
+
+```{r}
+#| fig-width: 13
+#| fig-height: 12
+
+
+design = "
+ABC
+DEF
+GGG
+"
+
+g <- 
+  g_cv_4_pl + labs(title = "Placebo arm", subtitle = "post-MTZ to week 4 (Initial phase)", tag = "A") +
+  g_cv_8_12_pl + labs(subtitle = "from week 4 to 8 to 12 (Continuation)") +
+  g_cv_24_pl + labs(subtitle = "from week 12 to 24 (Follow-up)") +
+  
+  g_models_4_pl + labs(subtitle = "post-MTZ to week 4 (Initial phase)", tag = "B") +
+  g_models_8_12_pl + labs(subtitle = "from week 4 to 8 to 12 (Continuation)") + 
+  g_models_24_pl + labs(subtitle = "from week 12 to 24 (Follow-up)") + 
+  
+  free(g_combined_bicp_pl + labs(tag = "C")) +
+  
+  plot_layout(
+    guides = "collect", nrow = 3, heights = c(1,1,1), design = design
+  ) 
+
+g
+
+```
+
+
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S8.pdf"), width = 13, height = 12, device = cairo_pdf)
+
+```
+
+
+
+
+
+## Supplementary figure 9
+
+Same as 7A for the placebo arm.
+
+
+```{r}
+
+
+coefs_P <- 
+  bind_rows(
+    get_mtb_coef(res = mod_week4_pl$res, boot = mod_week4_pl$boot) |> 
+      mutate(phase = "Initial"),
+    get_mtb_coef(res = mod_week8_and_12_pl$res, boot = mod_week8_and_12_pl$boot) |>
+      mutate(phase = "Continuation"),
+    get_mtb_coef(res = mod_week24_pl$res, boot = mod_week24_pl$boot) |>
+      mutate(phase = "Follow-up")
+  ) |> 
+  mutate(
+    Yvar = 
+      Yvar |> 
+      str_replace("rispatus", ".") |> 
+      str_replace("bacillus", ".") |> 
+      str_replace(",","\n")  |> 
+      fct_inorder(),
+    variable = variable |> str_replace("Lactobacillus, < 50% L. crispatus", "Lacto., < 50% L. c.") |> fct_inorder() |> fct_rev(),
+    phase = phase |> fct_inorder(),
+    CI_excludes_0 = ifelse(lo * up > 0, 1, 0)
+  )
+
+```
+
+
+```{r}
+#| fig-height: 12
+#| fig-width: 13
+
+g <- 
+coefs_P |>
+  ggplot() +
+  aes(x = value, y = variable, col = Yvar, alpha = CI_excludes_0) +
+  ggh4x::facet_nested(block ~ phase + Yvar, scales = "free_y", space = "free_y") +
+  geom_vline(xintercept = 0, col = "gray50") + 
+  geom_segment(aes(x = lo, xend = up, yend = variable), lineend = "round") + 
+  geom_point() + 
+  xlab("coefficient") +
+  ylab("") + 
+  scale_alpha_continuous(breaks = c(0, 1), range = c(0.2, 1)) +
+  guides(fill = "none", col = "none", alpha = "none") + 
+  theme(strip.text = element_text(color = "black"), 
+        strip.text.y = element_text(angle = 0, hjust = 0)) +
+  scale_color_manual(values = get_topic_colors(c("I","III","IV"))) +
+  ggtitle("Placebo arm")
+
+g
+
+```
+
+
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S9.pdf"), width = 13, height = 12, device = cairo_pdf)
+
+```
+
+
+
+
+# Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>

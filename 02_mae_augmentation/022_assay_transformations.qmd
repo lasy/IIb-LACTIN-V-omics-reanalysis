@@ -1,0 +1,1134 @@
+---
+title: "Assay transformation"
+author: Laura Symul
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    embed-resources: true
+execute:
+  cache: true
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+## Cytokine assay data transformation
+
+In this section, we filter and transform cytokine data.
+
+
+```{r}
+
+cytok <- 
+  get_assay_long_format(
+    mae, "cytokine", add_colData = TRUE,
+    feature_name = "cytokine", values_name = "concentration"
+    )
+
+```
+
+
+
+### Exploratory analyses
+
+```{r}
+
+g_raw_cytok <- 
+  cytok |> 
+  ggplot(aes(x = concentration, fill = cytokine)) +
+  geom_histogram(bins = 50) +
+  facet_wrap(cytokine ~ .) +
+  guides(fill = "none") +
+  ggtitle('Distribution of "raw" cytokine concentrations',
+          subtitle = "with imputed ULOQ and LLOQ values")
+
+
+g_raw_cytok 
+
+
+g_raw_cytok +
+  scale_x_log10() 
+
+
+```
+
+From these first plots, it is clear that the data needs some transformation, potentially a log transformation if that also helps stabilizing the variance. We also see that for many samples, concentrations were either below or above the limits of quantification (LLOQ and ULOQ) and were imputed. 
+
+We also look at the distribution per sample:
+
+```{r}
+
+# cytok |> 
+#   group_by(Barcode) |> 
+#   mutate(median_log_concentration = median(log(concentration))) |>
+#   ungroup() |> 
+#   arrange(median_log_concentration) |> mutate(Barcode = Barcode |> fct_inorder()) |> 
+#   ggplot(aes(x = Barcode, y = concentration)) +
+#   # geom_boxplot(outlier.shape = NA, linewidth = 0.2) +
+#   geom_point(aes(col = cytokine), size = 0.5, alpha = 0.6) + 
+#   geom_point(stat = "summary", fun = median, col = "black") +
+#   scale_y_log10() +
+#   theme(axis.text.x = element_blank())
+
+
+# cytok |> 
+#   group_by(Barcode) |> 
+#   mutate(median_log_concentration = median(log(concentration))) |>
+#   ungroup() |> 
+#   arrange(median_log_concentration) |> mutate(Barcode = Barcode |> fct_inorder()) |> 
+#   ggplot(aes(x = Barcode, y = concentration)) +
+#   # geom_boxplot(outlier.shape = NA, linewidth = 0.2) +
+#   geom_point(aes(col = cytokine), size = 0.5, alpha = 0.6) + 
+#   scale_y_log10() +
+#   facet_grid(cytokine ~ .) +
+#   theme(axis.text.x = element_blank())
+
+
+cytok |> 
+  group_by(Barcode) |> 
+  mutate(median_log10_concentration_per_sample = median(log10(concentration))) |> 
+  ungroup() |> 
+  arrange(median_log10_concentration_per_sample) |> 
+  mutate(Barcode = Barcode |> fct_inorder()) |> 
+  group_by(cytokine) |> 
+  mutate(median_log10_concentration_per_cytokine = median(log10(concentration))) |> 
+  ungroup() |>
+  arrange(median_log10_concentration_per_cytokine) |> 
+  mutate(cytokine = cytokine |> fct_inorder()) |>
+  ggplot(aes(x = Barcode, y = cytokine, fill = concentration |> log10())) +
+  geom_tile() +
+  theme(axis.text.x = element_blank()) +
+  scale_fill_gradient(low = "seashell", high = "midnightblue")
+
+```
+
+
+We see that there might be a strong "size effect" in the data as samples with high levels of one cytokines appear to also have high levels of other cytokines. 
+
+
+### Log transformation for variance stabilization.
+
+We check if a $\log_{10}$ transformation stabilizes the variance of the data.
+
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+
+cytok <- 
+  cytok |> mutate(log10_concentration = log10(concentration)) |> 
+  select(Barcode, cytokine, concentration, log10_concentration, everything())
+
+
+cytok_summary <- 
+  cytok |> 
+  group_by(cytokine) |> 
+  summarize(
+    `mean concentration` = mean(concentration, na.rm = TRUE),
+    `var concentration` = var(concentration, na.rm = TRUE),
+    `mean log10(concentration)` = mean(log10_concentration, na.rm = TRUE),
+    `var log10(concentration)` = var(log10_concentration, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cytok_summary |> 
+  ggplot(aes(x = `mean concentration`, y = `var concentration`)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = "y ~ x") +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle("Mean-Variance on raw concentration") +
+
+cytok_summary |> 
+  ggplot(aes(x = `mean log10(concentration)`, y = `var log10(concentration)`)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = "y ~ x") +
+  ggtitle("Mean-Variance on log10-transformed concentration") +
+  labs(caption = "Each dot is a cytokine")
+
+```
+
+
+
+The log10-transformation seems to stabilize the variance, although there might still be residual heteroskedasticity. We will use the log10-transformed data for downstream analyses.
+
+We add an assay with the log10-transformed data to our multi-assay experiment object:
+
+```{r}
+
+
+cytokines <- MultiAssayExperiment::assay(mae, "cytokine")
+transformed_cytokines <- cytokines |> log10()
+
+transformed_cytokines_assay <- list()
+transformed_cytokines_assay[["cytokine_log10"]] <-
+  SummarizedExperiment::SummarizedExperiment(
+    assay = transformed_cytokines
+  )
+
+mae <- c(mae, transformed_cytokines_assay)
+
+```
+
+
+### Size effect
+
+As seen on one of the plots above, there might be a strong size effect in the data. This size effect might be a biological size effect (co-regulation of all cytokines) or an artifact related to the amount of material that was on each swab.
+
+First, let's characterize that effect by computing the correlations between cytokine transformed concentrations. 
+
+##### Correlations between cytokines
+
+```{r}
+#| fig-height: 9
+#| fig-width: 9
+#| fig-cap: "Correlation matrix of cytokine log10-transformed concentrations"
+
+cytok_corr <- cor(transformed_cytokines |> t())
+res <- Hmisc::rcorr(transformed_cytokines |> t())$P |> p.adjust("BH") |> range(na.rm = TRUE)
+corrplot::corrplot(cytok_corr, method = "color", diag = FALSE, addCoef.col = "black", tl.col = "black", tl.srt = 45)
+  
+```
+
+
+```{r}
+#| eval: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S4B.pdf"), width = 9, height = 9, device = cairo_pdf)
+
+```
+
+##### Associations between the mean z-log10(c) and various variables
+
+Correlations are all highly positive (and statistically different from 0).
+
+To assess whether this size effect might be a technical or biological effect, we examine the association between the per-sample-mean of the scaled log10 concentrations and a series of variables that may drive that biological effect. The variables we check for are:
+
+- sample's visit
+- participants IDs
+- participants' age
+- participants' race
+- participants' birth control method
+- the proportions of *Lactobacillus* in each sample
+- the proportion of non-*iners* *Lactobacillus*
+
+
+```{r}
+
+cytok <- 
+  get_assay_long_format(
+    mae, "cytokine_log10", feature_name = "cytokine", values_name = "log10_concentration"
+    ) |> 
+  left_join(
+    get_assay_wide_format(mae, "prop_Lacto", add_colData = FALSE) |> dplyr::rename(MB_props = assay),
+    by = join_by(Barcode)
+  ) |> 
+  mutate(Visit = AVISITN |> get_visit_labels())
+
+cytok_summary <- 
+  cytok |> 
+  group_by(cytokine) |> mutate(scaled_log10_concentration = scale(log10_concentration)) |> ungroup() |> 
+  mutate(prop_Lacto = MB_props$prop_Lacto, prop_non_iners_Lacto = MB_props$prop_non_iners_Lacto) |> 
+  group_by(Barcode, USUBJID, Visit, AGE, RACEGR2, BC, prop_Lacto, prop_non_iners_Lacto) |> 
+  summarize(`mean z-log10(conc.)` = mean(scaled_log10_concentration), .groups = "drop")
+
+```
+
+
+```{r}
+
+cytok_summary |> 
+  ggplot(aes(x = Visit, y = `mean z-log10(conc.)`)) +
+  geom_path(aes(group = USUBJID), col = "gray70", alpha = 0.3) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(height = 0, width = 0.2) 
+
+lm(`mean z-log10(conc.)` ~ Visit, data = cytok_summary) |> summary()
+
+```
+
+Concentrations are a significantly lower at the post-MTZ visit, which is consistent with *both* a biological effect or a technical artifact due to amount on swab.
+
+
+```{r}
+
+cytok_summary <- 
+  cytok_summary |> 
+  group_by(USUBJID) |> mutate(median_mean = median(`mean z-log10(conc.)`)) |> ungroup() |> 
+  arrange(median_mean) |> mutate(USUBJID = USUBJID |> fct_inorder()) 
+
+cytok_summary |> 
+  ggplot(aes(x = USUBJID, y = `mean z-log10(conc.)`)) +
+  geom_boxplot(fill = "aquamarine3") # + geom_point(aes(color = Visit))
+
+lm(`mean z-log10(conc.)` ~ USUBJID, data = cytok_summary) |> anova()
+
+```
+
+It also looks like there is a strong participant-effect.
+
+Let's explore this in more details for 10 random participants:
+
+```{r}
+#| fig-height: 9
+#| fig-width: 9
+
+selected_USUBJID <- levels(cytok_summary$USUBJID)
+selected_USUBJID <- selected_USUBJID[seq(1, length(selected_USUBJID), len = 10)|> round() ] 
+
+cytok |> 
+  group_by(cytokine) |> 
+  mutate(z_log10_concentration = scale(log10_concentration)) |> 
+  ungroup() |> 
+  filter(USUBJID %in% selected_USUBJID) |> 
+  ggplot(aes(x = cytokine, y = Visit |> fct_rev(), fill = z_log10_concentration)) +
+  geom_tile() +
+  facet_grid(USUBJID ~ ., scales = "free", space = "free") +
+  scale_fill_gradient2() +
+  ylab("Visit")
+
+```
+
+
+
+```{r}
+
+cytok_summary |>
+  ggplot(aes(x = AGE, y = `mean z-log10(conc.)`, col = USUBJID, group = USUBJID)) +
+  geom_path(position = position_dodge(width = 0.4)) +
+  geom_point(position = position_dodge(width = 0.4), alpha = 0.7) +
+  guides(col = "none")
+
+# lm_model <- lm(`mean z-log10(conc.)` ~ AGE + USUBJID, data = cytok_summary)
+# summary(lm_model)
+
+lme_model <- lme4::lmer(`mean z-log10(conc.)` ~ AGE + (1|USUBJID), data = cytok_summary)
+summary(lme_model)
+car::Anova(lme_model, type = "II")
+
+
+```
+
+There is a statistically significant, but very mild, decrease with age, which might also be consistent with a biological effect or a technical artifact?
+
+
+```{r}
+
+cytok_summary |>
+  ggplot(aes(x = RACEGR2, y = `mean z-log10(conc.)`)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_path(aes(col = USUBJID, group = USUBJID), position = position_dodge(width = 0.4)) +
+  geom_point(aes(col = USUBJID, group = USUBJID), position = position_dodge(width = 0.4), alpha = 0.7) +
+  guides(col = "none")
+
+# lm_model <- lm(`mean z-log10(conc.)` ~ RACEGR2 + USUBJID, data = cytok_summary)
+# summary(lm_model)
+
+lme_model <- lme4::lmer(`mean z-log10(conc.)` ~ RACEGR2 + (1|USUBJID), data = cytok_summary)
+summary(lme_model)
+car::Anova(lme_model, type = "II")
+
+
+```
+
+No significant differences here.
+
+
+```{r}
+#| fig-width: 9
+
+cytok_summary |>
+  filter(!is.na(BC)) |> 
+  ggplot(aes(x = BC, y = `mean z-log10(conc.)`)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_path(aes(col = USUBJID, group = USUBJID), position = position_dodge(width = 0.4)) +
+  geom_point(aes(col = USUBJID, group = USUBJID), position = position_dodge(width = 0.4), alpha = 0.7) +
+  guides(col = "none")
+
+# lm_model <- lm(`mean z-log10(conc.)` ~ BC + USUBJID, data = cytok_summary)
+# summary(lm_model)
+
+lme_model <- lme4::lmer(`mean z-log10(conc.)` ~ BC + (1|USUBJID), data = cytok_summary)
+summary(lme_model)
+car::Anova(lme_model, type = "II")
+
+
+```
+
+There is a significant effect of the birth control method. Again, that may indicate a biological effect (copper IUD may increase overall inflammation) or a technical artifact (some birth controls may alter the mucus and how much material may be typically collected on swab).
+
+```{r}
+
+cytok_summary |> 
+  ggplot(aes(x = prop_Lacto, y = `mean z-log10(conc.)`)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  
+cytok_summary |> 
+  ggplot(aes(x = prop_non_iners_Lacto, y = `mean z-log10(conc.)`)) +
+  geom_point() +
+  geom_smooth(se = FALSE)
+
+lme_model <- lme4::lmer(`mean z-log10(conc.)` ~ prop_Lacto + (1|USUBJID), data = cytok_summary)
+summary(lme_model)
+car::Anova(lme_model, type = "II")
+
+lme_model <- lme4::lmer(`mean z-log10(conc.)` ~ prop_non_iners_Lacto + (1|USUBJID), data = cytok_summary)
+summary(lme_model)
+car::Anova(lme_model, type = "II")
+
+```
+
+Here, we see a mild but statistically significant association with the proportion of *Lactobacillus* in the sample. The effect is very small and accounts for very little of the observed variance.
+
+Based on these plots, we conclude that technical variability such as variability in the total amount of material collected on swabs might be as or more important than biological factors in driving the size effect observed in the cytokine concentrations.
+
+Consequently, we adjust for this size effect, thereby attempting to correct for the total amount of material collected on swab. We do this adjustment by removing the first principal component of the scaled log concentrations. 
+
+
+#### PCA of the scaled log concentrations & size effect estimation
+
+The PCA of the scaled log(concentrations) also highlight that strong size effect.
+
+```{r}
+
+cytokines <- 
+  get_assay_wide_format(mae, "cytokine_log10") |> 
+  left_join(
+    get_assay_wide_format(mae, "CST", add_colData = FALSE) |> unnest(assay),
+    by = "Barcode"
+  ) |> 
+  left_join(
+    get_assay_wide_format(mae, "prop_Lacto", add_colData = FALSE) |> unnest(assay),
+    by = "Barcode"
+  )
+
+cytokine_pca <- prcomp(cytokines$assay |> set_rownames(cytokines$Barcode), scale = TRUE)
+
+cytokine_pca_var <- 
+  cytokine_pca |>
+  broom::tidy(matrix = "eigenvalues") 
+
+```
+
+```{r}
+#| fig-height: 2.5
+#| fig-width: 9
+#| fig-caption: "PCA screeplot: variance explained by each PC"
+plot_pca_var(cytokine_pca_var)
+
+```
+
+```{r}
+
+cytokine_pca_var|> 
+  dplyr::rename(`% var` = percent, `cumulative % var` = cumulative) |> 
+  gt() |> 
+  fmt_percent(columns = c(`% var`, `cumulative % var`)) |> 
+  fmt_number(columns = std.dev, decimals = 2)
+
+```
+
+
+
+```{r}
+#| fig-height: 3
+#| fig-caption: "PCA correlation circle (correlation of each cytokine with the first 2 PCs)"
+
+plot_pca_correlation_circle(cytokines$assay, cytokine_pca, cytokine_pca_var)
+
+```
+
+
+The first principal component capture the size effect and we see that it is very correlated with the "mean scaled log10(concentration)" we computed above: 
+
+```{r}
+
+cytok_summary |> 
+  left_join(cytokine_pca$x |> as.data.frame() |> rownames_to_column("Barcode"), by = join_by(Barcode)) |> 
+  ggplot(aes(x = PC1, y = `mean z-log10(conc.)`)) +
+  geom_point()
+
+```
+
+
+Such that the relationships we highlighted above can also be seen in the PCA space:
+
+```{r}
+#| fig-height: 3.5
+#| fig-cap: "PCA scores plot, colored by samples' Lactobacillus proportion."
+
+Sample_PCs <- cytokine_pca |> broom::augment(cytokines |> select(-assay))  
+
+plot_pca_samples(Sample_PCs, pca_var = cytokine_pca_var, color_by = "prop_Lacto") +
+  scale_color_gradient2(
+    "Prop Lactobacillus",
+    low = "red", high = "dodgerblue3", mid = "gray80", midpoint = 0.5) +
+  theme(legend.position = "top") #+ coord_fixed()
+
+```
+
+
+```{r}
+#| fig-width: 4
+#| fig-height: 3
+
+Sample_PCs |> 
+  ggplot(aes(x = prop_Lacto, y = .fittedPC1)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm") 
+
+lme_model <- lme4::lmer(.fittedPC1 ~ prop_Lacto + (1|USUBJID), data = Sample_PCs)
+summary(lme_model)
+car::Anova(lme_model, type = "II")
+
+lme_model <- lme4::lmer(.fittedPC2 ~ prop_Lacto + (1|USUBJID), data = Sample_PCs)
+summary(lme_model)
+car::Anova(lme_model, type = "II")
+
+```
+
+There see a very mild (but statistically significant) relationship between the first PC and the proportion of *Lactobacillus*, but a much stronger one with the 2nd PC.
+
+
+```{r}
+#| fig-height: 3.5
+#| fig-cap: "PCA scores plot, colored by samples' CST"
+
+plot_pca_samples(Sample_PCs, pca_var = cytokine_pca_var, color_by = "CST") +
+  scale_color_manual(
+    values = get_topic_colors(Sample_PCs$CST |> unique() |> sort())
+  )
+
+```
+
+
+```{r}
+#| fig-height: 3.5
+#| fig-cap: "PCA scores plot, colored by participants' BC"
+
+plot_pca_samples(Sample_PCs, pca_var = cytokine_pca_var, color_by = "BC") +
+  stat_ellipse()
+ 
+plot_pca_samples(
+  Sample_PCs |> filter(AVISITN %in% c(0, 7)), 
+  pca_var = cytokine_pca_var, color_by = "BC") +
+  stat_ellipse() +
+  facet_grid(AVISITN ~ ARM) 
+
+```
+
+
+```{r}
+#| fig-width: 9
+#| fig-height: 3
+
+plot_pca_samples(
+  Sample_PCs |> 
+    filter(PIPV) |> 
+    mutate(Visit = str_c("Visit: ", AVISITN) |> factor()), 
+  pca_var = cytokine_pca_var, color_by = "Visit") +
+  facet_grid(ARM ~ Visit) +
+  guides(col = "none")
+
+```
+
+
+
+#### Removal of size effect (PC1 substraction)
+
+
+To remove that size effect, we remove the first PC from the scaled log2-transformed concentrations. This is almost equivalent to regressing out the mean scaled log2(concentration) from the data. 
+
+To remove the PC1 from the data, we set the first PC to 0 then multiply by the inverse of the rotation matrix.
+
+Indeed, we have: 
+
+$E = XR$ where $E$ are the coordinates in the PC space, $X$ are the coordinates
+in the original space (the scaled log2-transformed concentrations), and $R$ is the rotation matrix.
+
+```{r}
+
+X <- cytokines$assay |> as.matrix() |> scale()
+(cytokine_pca$x == X %*% cytokine_pca$rotation) |> all()
+
+```
+
+So, we have $X = E R^{-1}$:
+
+```{r}
+
+X_hat <- cytokine_pca$x %*% solve(cytokine_pca$rotation)
+all(round(X_hat,6) == round(X, 6))
+
+```
+
+Consequently, setting $E[,1]$ to 0 (*i.e.*, we project the first PC on its axis) and multiplying by the inverse rotation is equivalent to removing the first PC from the original data. 
+
+
+```{r}
+
+PC1_removed <- 
+  cytokine_pca$x |> as.data.frame() |> mutate(PC1 = 0) |> as.matrix()
+PC1_removed <- PC1_removed %*% solve(cytokine_pca$rotation)
+
+```
+
+
+#### Effects of PC1 substraction
+
+
+```{r}
+
+PC1_removed_long <- 
+  PC1_removed |> 
+  as_tibble() |> 
+  mutate(Barcode = cytokines$Barcode) |> 
+  pivot_longer(
+    cols = -Barcode,
+    names_to = "cytokine",
+    values_to = "PC1_removed_log10_conc"
+  ) |> 
+  left_join(cytokines |> select(-assay), by = join_by(Barcode))
+
+```
+
+
+Below, we show the relationships between the scaled log2(concentrations) and the PC1-removed log2(concentrations).
+
+
+```{r}
+
+log10_conc <- 
+  PC1_removed_long |> 
+  left_join(
+    get_assay_long_format(
+      mae, "cytokine_log10", add_colData = FALSE,
+      feature_name = "cytokine", values_name = "log10_concentration"
+    ) |> 
+    group_by(cytokine) |> mutate(scaled_log10_concentration = scale(log10_concentration)) |> ungroup(), 
+    by = join_by(Barcode, cytokine)
+  )
+
+ggplot(log10_conc, aes(x = scaled_log10_concentration, y = PC1_removed_log10_conc)) +
+  geom_point(size = 0.5, alpha = 0.25) +
+  facet_wrap(cytokine ~ .) +
+  xlab("scaled log10(concentration)") + ylab("PC1-removed scaled log10(concentration)")
+
+```
+
+
+And the correlations between cytokines after PC1 removal
+
+```{r}
+#| eval: false
+dim(PC1_removed)
+# rownames(PC1_removed)
+# colnames(PC1_removed)
+```
+
+```{r}
+#| fig-height: 9
+#| fig-width: 9
+
+n_cytok <- ncol(PC1_removed)
+cytok_names <- colnames(PC1_removed)
+PC1_subtracted_cytok_corr <- cor(PC1_removed)
+PC1_subtracted_cytok_corr[PC1_subtracted_cytok_corr == 1] <- NA
+res <- Hmisc::rcorr(PC1_removed)$P |> p.adjust("BH")
+res <- res |> matrix(nrow = n_cytok, ncol = n_cytok) |> set_colnames(cytok_names) |> set_rownames(cytok_names)
+corrplot::corrplot(PC1_subtracted_cytok_corr, method = "color", addCoef.col = "black", tl.col = "black", tl.srt = 45, p.mat = res, sig.level = 0.05)
+
+# cor(PC1_removed) |> 
+#   as_tibble() |> 
+#   mutate(cytokine_1 = colnames(PC1_removed)) |> 
+#   pivot_longer(cols = -cytokine_1, names_to = "cytokine_2", values_to = "cor") |> 
+#   filter(cor != 1) |> 
+#   ggplot(aes(x = cytokine_1, y = cytokine_2, fill = cor)) +
+#   geom_tile() +
+#   scale_fill_gradient2(
+#     low = "coral", mid = "white", high = "turquoise4", midpoint = 0,
+#     breaks = seq(-1, 1, by = 0.25), limits = c(-1,1)
+#     ) +
+#   xlab("") + ylab("") +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+#   coord_fixed()
+
+```
+
+We see that now, some cytokines are correlated and some are anti-correlated. Of particular interest, we see now that IP-10 and IL-1b are anti-correlated, which is consistent with past literature.
+
+In addition, we check whether see PC1-removed log2(concentrations) follow the expected (based on previous publications) relationships with proportion of *Lactobacillus* (and CSTs).
+
+```{r}
+#| fig-height: 3.5
+#| fig-width: 12
+
+ggplot(PC1_removed_long, aes(x = prop_Lacto, y = PC1_removed_log10_conc)) +
+  geom_point(size = 0.35, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = "y ~ x") +
+  facet_grid(. ~ cytokine) +
+  scale_x_continuous(breaks = seq(0, 1, 0.5)) +
+  ylab("PC1-removed scaled log10(concentration)")
+
+ggplot(PC1_removed_long |> filter(!is.na(CST), CST != "II"), 
+       aes(x = CST, y = PC1_removed_log10_conc, fill = CST)) +
+  geom_boxplot(outlier.size = 0.5) +
+  facet_grid(. ~ cytokine) +
+  scale_fill_manual(
+    breaks = PC1_removed_long$CST |> unique() |> sort(),
+    values = get_topic_colors(PC1_removed_long$CST |> unique() |> sort())
+    ) +
+  guides(fill = "none") +
+  ylab("PC1-removed scaled log10(concentration)")
+
+```
+
+When considering original scaled log10-concentrations, we have:
+
+```{r}
+#| fig-height: 3.5
+#| fig-width: 12
+
+ggplot(log10_conc, aes(x = prop_Lacto, y = scaled_log10_concentration)) +
+  geom_point(size = 0.35, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = "y ~ x") +
+  facet_grid(. ~ cytokine) +
+  scale_x_continuous(breaks = seq(0, 1, 0.5)) +
+  ylab("Scaled log10(concentration)")
+
+ggplot(log10_conc |> filter(!is.na(CST), CST != "II"), 
+       aes(x = CST, y = scaled_log10_concentration, fill = CST)) +
+  geom_boxplot(outlier.size = 0.5) +
+  facet_grid(. ~ cytokine) +
+  scale_fill_manual(
+    breaks = PC1_removed_long$CST |> unique() |> sort(),
+    values = get_topic_colors(PC1_removed_long$CST |> unique() |> sort())
+    ) +
+  guides(fill = "none") +
+  ylab("Scaled log10(concentration)")
+
+```
+
+
+The table below provide the correlations between the cytokine log10-concentrations and the proportion of *Lactobacillus* before and after PC1 removal.
+
+```{r}
+#| fig-height: 8
+#| fig-width: 4
+
+tmp <- 
+  cbind(
+    cor(cytokines$assay, cytokines$prop_Lacto, use = "complete", method = "spearman"),
+    cor(PC1_removed, cytokines$prop_Lacto, use = "complete", method = "spearman")
+  ) |> 
+  set_colnames(c("log10(conc.)", "PC1 removed z-log10(conc.)"))
+
+tmp |> 
+  as.data.frame() |> 
+  rownames_to_column("cytokine") |>
+  pivot_longer(
+    cols = -cytokine,
+    names_to = "type",
+    values_to = "correlation"
+  ) |>
+  mutate(type = type |> fct_inorder()) |>
+  ggplot() +
+  aes(y = cytokine, x = type, fill = correlation) +
+  geom_tile() +
+  geom_text(aes(label = round(correlation, 2)), size = 3) +
+  scale_fill_gradient2() +
+  xlab("") +
+  ggtitle("Spearman correlations between cytokine concentrations and\nproportion of Lactobacillus for each cytokine")
+
+# tmp |> 
+#   knitr::kable(caption = "Spearman correlations between cytokine concentrations and proportion of Lactobacillus for each cytokine")
+
+```
+
+These relationships appear similar to those that have been observed in past studies (and, of particular interest, studies relying on CVL samples which are probably less sensitive in terms of total material contained in samples).
+
+
+#### Adding PC1-removed cytokines to the `mae` object
+
+Since we believe that PC1 subtraction may in removing technical artifact due to the total amount on swab, we save these transformed concentrations to the `mae` object.
+
+```{r}
+
+transformed_cytokines_assay <- list()
+transformed_cytokines_assay[["cytokine_log10_SE_corrected"]] <-
+  SummarizedExperiment::SummarizedExperiment(
+    assay = PC1_removed |> t() |> set_colnames(cytokines$Barcode)
+  )
+
+mae <- c(mae, transformed_cytokines_assay)
+
+```
+
+
+
+### LLOQ and ULOQ values: Filtering cytokines and samples.
+
+One important thing to note is that removing the size effect will lead the imputed LLOQ and ULOQ values (which were all imputed to the same values) to have different values based on the estimated effect size of each samples. For example, a LLOQ value in a sample with a high PC1 (~ a high total amount of material) will have a lower value after PC1-removal than a LLOQ value from a sample with a small PC1 (assumed to have less material on swab). So, the effect on LLOQ and ULOQ values depends on how well the size effect could be estimated, which, in turn, depends on the number of out-of-range values in the sample and our trust in cytokines' transformed concentrations also depends on how many cytokines had observable data.
+
+We should thus limit analyses relying on PC1-subtracted values to cytokines with sufficient data within the limits of quantification (and to samples with sufficient number of within-range cytokines).
+
+
+#### Removing cytokines with concentrations beyond limits of quantification
+
+Several cytokines have concentrations that were outside the limits of quantification (LLOQ and ULOQ) for a large fraction of samples. We remove these cytokines from the analysis. 
+
+```{r}
+
+cytok <- 
+  get_assay_long_format(mae, "cytokine_log10", feature_name = "cytokine", values_name = "log10_concentration") |> 
+  left_join(
+    get_assay_long_format(mae, "cytokine_log10_SE_corrected", feature_name = "cytokine", values_name = "transformed_concentration", add_colData = FALSE),
+    by = join_by(Barcode, cytokine) 
+  ) |> 
+  group_by(cytokine) |> 
+  mutate(
+    value_type = 
+      case_when(
+        log10_concentration == min(log10_concentration) ~ "LLOQ",
+        log10_concentration == max(log10_concentration) ~ "ULOQ",
+        TRUE ~ "within_range"
+      )
+  ) |> 
+  ungroup() |> 
+  select(Barcode, cytokine, value_type, log10_concentration, transformed_concentration, everything())
+
+fraction_at_LLOQ <- 
+  cytok |> 
+  group_by(cytokine) |> 
+  summarize(
+    n_LLOQ = sum(log10_concentration == min(log10_concentration)),
+    n_ULOQ = sum(log10_concentration == max(log10_concentration)),
+    n_tot = n()
+  ) |> 
+  mutate(
+    `fraction below LLOQ` = n_LLOQ/n_tot,
+    `fraction above ULOQ` = n_ULOQ/n_tot
+    ) |> 
+  arrange(-`fraction below LLOQ`)
+
+fraction_at_LLOQ |> gt()
+
+```
+
+
+```{r}
+
+threshold_LLOQ <- 0.6
+threshold_ULOQ <- 0.3
+
+```
+
+```{r}
+
+fraction_at_LLOQ <- 
+ fraction_at_LLOQ |> 
+  mutate(
+    included = 
+      (`fraction below LLOQ` < threshold_LLOQ) & 
+      (`fraction above ULOQ` < threshold_ULOQ)
+  )
+
+included_cytokines <- fraction_at_LLOQ$cytokine[fraction_at_LLOQ$included] |> as.character()
+excluded_cytokines <- fraction_at_LLOQ$cytokine[!fraction_at_LLOQ$included] |> as.character()
+
+```
+
+```{r}
+cytok <- cytok |> left_join(fraction_at_LLOQ, by = join_by(cytokine)) 
+```
+
+
+```{r}
+#| fig-height: 5
+
+g <- 
+ggplot(cytok, aes(x = log10_concentration, fill = included)) +
+  geom_histogram(bins = 50) +
+  facet_wrap(cytokine ~ ., nrow = 3) +
+  theme(legend.position = "bottom") +
+  labs(
+    x = "log10(imputed concentrations)",
+    caption = str_c("Samples were excluded if more than ", threshold_LLOQ*100,"% of their values were below the LLOQ or more than ",threshold_ULOQ*100 ,"% above the ULOQ")
+    )
+
+g
+
+
+ggplot(cytok, aes(x = transformed_concentration)) +
+  geom_histogram(aes(fill = value_type), bins = 100) +
+  geom_text(data = fraction_at_LLOQ |> mutate(included = ifelse(included, "included","excluded")), 
+            aes(label = included, col = included), x = Inf, y = Inf, hjust = 1, vjust = 1) +
+  facet_wrap(cytokine ~ ., nrow = 3) +
+  theme(legend.position = "bottom") 
+
+```
+
+
+```{r}
+
+ggsave(g, filename = str_c(fig_out_dir(), "S4A.pdf"), width = 10, height = 6, device = cairo_pdf)
+
+```
+
+Specifically, we exclude cytokines with concentration below the LLOQ for over `r 100*threshold_LLOQ`% of samples or above the ULOQ for over `r 100*threshold_ULOQ`% of samples.
+
+Based on these criteria, we exclude `r excluded_cytokines` from downstream analyses.
+
+We add a new assay to the `mae` object with the filtered cytokines.
+
+```{r}
+
+filtered_cytokines <- MultiAssayExperiment::assay(mae, "cytokine_log10_SE_corrected")
+filtered_cytokines <- filtered_cytokines[included_cytokines,]
+
+filtered_cytokines_assay <- list()
+filtered_cytokines_assay[["cytokine_log10_SE_corrected_incl_cytokine"]] <-
+  SummarizedExperiment::SummarizedExperiment(
+    assay = filtered_cytokines
+  )
+
+mae <- c(mae, filtered_cytokines_assay)
+
+```
+
+In case one is interested in also doing the analysis on the non-PC1-substracted cytokine data, we also add this assay to the `mae` object.
+
+```{r}
+
+filtered_cytokines <- MultiAssayExperiment::assay(mae, "cytokine_log10")
+filtered_cytokines <- filtered_cytokines[included_cytokines,]
+
+filtered_cytokines_assay <- list()
+filtered_cytokines_assay[["cytokine_log10_incl_cytokine"]] <-
+  SummarizedExperiment::SummarizedExperiment(
+    assay = filtered_cytokines
+  )
+
+mae <- c(mae, filtered_cytokines_assay)
+
+
+```
+
+
+#### Flagging samples with too few cytokines within limits of detection.
+
+```{r}
+
+cytok <- cytok |> mutate(Visit = AVISITN |> get_visit_labels()) 
+
+cytok_filtered <- cytok |> filter(cytokine %in% included_cytokines)
+
+sample_summary <- 
+  cytok |>
+  group_by(Barcode, Visit, USUBJID, PIPV, ARM) |>
+  summarize(
+    n_within_range = sum(value_type == "within_range"),
+    n_tot = n(),
+    .groups = "drop"
+  ) |> 
+  arrange(USUBJID, Visit)
+
+sample_summary <- 
+  sample_summary |> 
+  group_by(USUBJID) |> mutate(mean_n_within_range = mean(n_within_range)) |> ungroup() |> 
+  arrange(mean_n_within_range) |> mutate(USUBJID = USUBJID |> fct_inorder())
+                                         
+sample_summary |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = Visit, y = USUBJID)) +
+  geom_tile(aes(fill = n_within_range)) +
+  scale_fill_gradient2(low  = "red", mid = "gray", high = "steelblue1", midpoint = 5.5, breaks = seq(0, 13, by = 3)) +
+  facet_grid(ARM ~ ., scales = "free_y", space = "free") 
+
+```
+
+Again, we see a strong participant and visit effect on the number of out-of-range values.
+
+```{r}
+
+sample_summary |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = Visit, y = n_within_range, fill = ARM)) +
+  geom_boxplot() +
+  scale_fill_manual(values = get_arm_colors()) 
+
+
+```
+
+```{r}
+
+sample_summary |> 
+  ggplot(aes(x = n_within_range, fill = ARM)) +
+  geom_vline(xintercept = 5.5, linetype = 2, col = "red") +
+  geom_histogram(binwidth = 0.5) +
+  facet_grid(ARM ~ ., scales = "free_y") +
+  scale_fill_manual(values = get_arm_colors()) 
+
+```
+
+We flag samples with strictly less than 5 cytokines within the limits of detection:
+
+```{r}
+
+flagged_samples <- sample_summary |> filter(n_within_range < 5) 
+included_samples <- sample_summary |> filter(n_within_range >= 5)
+
+flagged_samples |> 
+  group_by(USUBJID, ARM) |> 
+  summarize(n_flagged_samples = n(), .groups = "drop") |> 
+  arrange(-n_flagged_samples) |> 
+  gt()
+
+```
+
+```{r}
+
+flagged_samples |> 
+  mutate(Arm = ARM |> str_replace("ACTIN", "actin")) |> 
+  arrange(Visit, Arm) |> 
+  group_by(Visit, Arm) |> 
+  summarize(`n flagged samples` = n(), .groups = "drop") |> 
+  pivot_wider(names_from = Arm, values_from = `n flagged samples`) |> 
+  gt(
+    rowname_col = "Visit",
+    caption = "Number of flagged samples"
+  ) |>
+  grand_summary_rows(
+    columns = -c("Visit"),
+    fns =  list(label = "Total", id = "totals", fn = "sum"),
+    fmt = ~ fmt_integer(.),
+    side = "bottom"
+  ) 
+
+```
+
+
+
+```{r}
+
+transformed_cytokines <- MultiAssayExperiment::assay(mae, "cytokine_log10_SE_corrected_incl_cytokine")
+transformed_cytokines <- transformed_cytokines[,included_samples$Barcode]
+
+transformed_cytokines_assay <- list()
+transformed_cytokines_assay[["cytokine_transformed"]] <-
+  SummarizedExperiment::SummarizedExperiment(
+    assay = transformed_cytokines
+  )
+
+mae <- c(mae, transformed_cytokines_assay)
+
+```
+
+
+
+In the `cytokine_log10_incl_cytokine` assay, we only add a column to the assay `colData` to flag these samples.
+
+```{r}
+
+tmp <- mae[["cytokine_log10_incl_cytokine"]]@colData |> as.data.frame() |> rownames_to_column("Barcode") |> as_tibble()
+tmp <- 
+  tmp |> 
+  select(-any_of(c("n_within_range", "flagged"))) |> 
+  left_join(
+    sample_summary |> select(Barcode, n_within_range) |> mutate(flagged = n_within_range < 5), 
+    by = join_by(Barcode)
+    )
+
+mae[["cytokine_log10_incl_cytokine"]]$n_within_range <- tmp$n_within_range
+mae[["cytokine_log10_incl_cytokine"]]$flagged <- tmp$flagged
+
+```
+
+
+
+
+
+```{r}
+#| fig-height: 5
+#| fig-width: 8
+
+log10_conc <- 
+  log10_conc |> 
+  select(-any_of("sample")) |> 
+  left_join(included_samples |> select(Barcode) |> mutate(sample = "included"), by = join_by(Barcode)) |> 
+  select(Barcode, cytokine, PC1_removed_log10_conc, scaled_log10_concentration, sample) |> 
+  mutate(sample = sample |> str_replace_na("flagged"))
+ 
+
+ggplot(log10_conc) +
+  aes(x = scaled_log10_concentration, y = PC1_removed_log10_conc, col = sample) +
+  geom_point(size = 0.5, alpha = 0.25) +
+  facet_wrap(cytokine ~ .) +
+  xlab("scaled log2(concentration)") + ylab("PC1-removed scaled log2(concentration)")
+
+```
+
+### Reordering cytokines
+
+Finally, to ease the interpretation of downstream analyses, we re-order the cytokines such that correlated ones are grouped together.
+
+```{r}
+
+PC1_removed <- get_assay_wide_format(mae, "cytokine_log10_SE_corrected")
+PC1_removed <- PC1_removed$assay |> as.data.frame() |> set_rownames(PC1_removed$Barcode)
+
+```
+
+
+
+```{r}
+
+cor_c <- cor(PC1_removed)
+hclust_cor <- hclust((1 - cor_c) |> as.dist())
+ordered_cytokines <- colnames(PC1_removed)[hclust_cor$order]
+
+```
+
+
+```{r}
+
+corrplot::corrplot(cor_c[ordered_cytokines, ordered_cytokines], method = "color",  tl.col = "black", tl.srt = 45)
+
+```
+
+
+Modifying the existing mae assays:
+
+```{r}
+
+ac <- mae[["cytokine"]]
+j <- ordered_cytokines |> intersect(rownames(ac))
+mae[["cytokine"]] <- ac[j,]
+
+ac <- mae[["cytokine_log10"]]
+j <- ordered_cytokines |> intersect(rownames(ac))
+mae[["cytokine_log10"]] <- ac[j,]
+
+ac <- mae[["cytokine_log10_SE_corrected"]]
+j <- ordered_cytokines |> intersect(rownames(ac))
+mae[["cytokine_log10_SE_corrected"]] <- ac[j,]
+
+ac <- mae[["cytokine_log10_SE_corrected_incl_cytokine"]]
+j <- ordered_cytokines |> intersect(rownames(ac))
+mae[["cytokine_log10_SE_corrected_incl_cytokine"]] <- ac[j,]
+
+ac <- mae[["cytokine_log10_incl_cytokine"]]
+j <- ordered_cytokines |> intersect(rownames(ac))
+mae[["cytokine_log10_incl_cytokine"]] <- ac[j,]
+
+ac <- mae[["cytokine_transformed"]]
+j <- ordered_cytokines |> intersect(rownames(ac))
+mae[["cytokine_transformed"]] <- ac[j,]
+
+
+```
+

@@ -1,0 +1,1734 @@
+---
+title: "Clinical data preparation for downstream analyses"
+author: Laura Symul
+date: today
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    standalone: true
+    embed-resources: true
+    number-sections: true
+    page-layout: full
+execute:
+  cache: true # true | refresh
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+```{r}
+#| cache: false
+#| echo: false
+#| warning: false
+
+library(tidyverse)
+library(wesanderson)
+library(viridis)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+library(gt)
+
+tmp <- fs::dir_map("R/", source)
+tmp <- fs::dir_map("../../R/", source)
+
+theme_set(theme_light())
+
+```
+
+# Clinical Data: Introduction
+
+This document presents and processes the clinical data that have been collected
+throughout the LACTIN-V 2b study. Clinical data have collected from participants
+using several CRFs. Most CRFs were filled by study nurses, physicians, or study
+staff members during their interactions with study participants. A few CRFs were
+also directly filled by participants, then reviewed by study staffs together
+with participants to reduce variability due to participant subjectivity.
+
+The information contained in these CRFs were then coded digitally and stored in
+multiple tables, where data is organized by CRF and data type. Raw logs were
+then transformed into variables that could be used for downstream analyses.
+
+
+Tables were built and documented by Emmes (AdvantageEDC software). 
+Data, along with associated documentation, were transferred to us in two directories: `SDTM` and `ADaM`.
+
+`SDTM` stands for "Study Data Tabulation Model" and this directory contains the
+raw CRF data; while `ADaM` stands for "Analysis Data Model" and contains the
+transformed data. In these two directories, we find a series of `.xlxs` files
+(exports of the database), as well as directory-specific documentation files. By
+convention, all `ADaM` table file names start with `AD`.
+
+Of particular interest:
+
+-   The `acrf.pdf` document contains annotated versions of the CRFs where each
+    CRF field is annotated with the table and variable name. This document is
+    the most useful to understand in which table the CRF answers can be found.
+
+-   The two `define.html` files (in each directory) details the content of each
+    table and the format of each columns.
+
+-   The files `14-0029_SDRG_v1.0.docx` (in `SDTM`) and `14-0029_ADRG_v1.0.docx`
+    (in `ADaM`) provide Study Data (`SD`) or Analysis Data (`AD`) Reviewer's
+    Guides. These guides contain complementary information to the documents
+    listed above.
+
+-   The files `Complex Algorithms.pdf` and `Complex Derivations.pdf` explain how
+    specific variables from the `ADaM` tables are computed.
+
+-   The files `Nugent_Scoring_Guide.pdf` and `Amsel_Criteria_Scoring_Guide.pdf`
+    provide additional information regarding variables storing Nugent and Amsel
+    test results.
+
+## Purposes of this document
+
+The purposes of this analysis are (1) to perform a series of sanity checks on the
+clinical data values, and (2) to create a series of tables that will be used for
+downstream analyses.
+
+Specifically, from the information contained in the Emmes database tables (the `ADaM` or `STDM` sets of
+tables), we create the following tables: 
+
+-   a **subject-level** table, with subject-related variables, such as
+    demographics variables, study arm, study completion status, etc.;
+    
+-   a **visit-level** table, with variables collected (or summarized) at each
+    visit, such as the BV diagnosis;
+    
+-   a **swab-level** table, which specifies the participant and visit ID from
+    which the swab was collected;
+    
+-   an **events** table, with information regarding various events that can
+    happen throughout the visits, such as concomitant medication, sexual
+    intercourse, menstruation, etc.
+
+These tables will ultimately be joined by participants and visits to form a
+single "metadata" table that will be stored in the `colData` slot of the future
+`MAE` (multi-assay experiment) object used in the downstream analyses.
+
+Along with these subject-, visit-, and event-level tables, we also create two
+additional "dictionary" tables:
+
+1.  `variable_info` provides a "print name" and the type of each column of the
+    three tables of interest;
+
+2.  `factor_values` lists the possible values and associated colors of the
+    variables (columns) that are categorical (`factors`)
+
+These two tables will be used to automate the annotations of figures and the
+creation of legends.
+
+```{r}
+
+variable_info <- 
+  tibble(
+    var = "USUBJID", 
+    label = "Participant ID", 
+    type = "character" |> 
+      factor(levels = c("character","logical","numerical","integer")),
+    group = "Study info"
+  )
+
+factor_values <- 
+  tibble(
+    var = character(0), 
+    values = character(0), 
+    colors = character(0)
+    )
+
+```
+
+
+
+## Data
+
+The data is stored on the `Gates LACTIN-V` Dropbox directory.
+
+We access the files in that directory with [`rclone`](https://rclone.org) .
+
+To be able to execute the code in this document, `rclone` must be
+[installed](https://rclone.org/install/) and
+[configured](https://rclone.org/dropbox/). Important: during the configuration,
+please name your Dropbox configuration `lactinv-dropbox`. Also, you need to make
+sure that the `Gates LACTIN-V` directory is at the top level on your Dropbox.
+
+The next chunk will allow you to check that `rclone` is installed and configured
+properly. It should list 3 directories as shown on the screenshot below.
+
+```{bash}
+#| eval: false
+rclone lsd lactinv-dropbox:"/Gates LACTIN-V/LACTIN-V 2B CLINICAL DATASET/EMMES DATABASE 05-19-2020/"
+```
+
+![](images/image-1247647616.png)
+
+To be able to read the files from the clinical database, we will temporary
+"mount" the `/Gates LACTIN-V/` dropbox directory locally (in
+`lactinv_dropbox/`).
+
+```{bash}
+#| eval: false
+mkdir -p lactinv_dropbox
+rclone mount lactinv-dropbox:"/Gates LACTIN-V/" "lactinv_dropbox/"
+```
+
+As the directory is locally mounted, we can use it to load the clinical data
+files.
+
+Alternatively, you can modify the `/R/data_dir()` function to hardcode the path to the Dropbox directory.
+
+
+```{r}
+
+clinical_data_dir <- 
+  str_c(
+    data_dir(), 
+    "00_raw/LACTIN-V 2B CLINICAL DATASET/EMMES DATABASE 05-19-2020/"
+    )
+
+SDTM_dir <- str_c(clinical_data_dir, "14-0029_SDTM_DefineXML_Package/SDTM_xlsx/")
+ADaM_dir <- str_c(clinical_data_dir, "14-0029_ADaM_DefineXML_Package/ADaM_xlsx/")
+
+```
+
+To test that it works, we can load one of the `csv` file (`ADSL.xlsx`) and check its size. It should print `522  96`.
+
+```{r}
+
+ADSL <- readxl::read_xlsx(stringr::str_c(ADaM_dir, "ADSL.xlsx"), guess_max = 10000)
+dim(ADSL) # should be 522 x 96
+```
+
+
+
+# Events data (`events` table)
+
+
+```{r child = 'sub-01_events_table.Qmd', cache=TRUE}
+```
+
+
+# Participants data (`subjects` table)
+
+```{r child = 'sub-02_subject_level_table.Qmd', cache=TRUE}
+```
+
+
+## Summaries from the `events` table
+
+We add a few columns to the `subjects` table summarizing information from the `events` table. 
+
+
+
+### Antibiotics use during the study 
+
+We summarize whether participants took any additional oral or vaginal antibiotics (Metronidazole or Clindamycin) during the study.
+
+```{r}
+
+
+variable_info <- 
+  variable_info %>% 
+  bind_rows(
+    tibble(var = "ADD_V_ABIO_W1_12", 
+           label = "additional vaginal ABX during intervention", 
+           type = "integer", group = "ABIO"),
+    tibble(var = "ADD_V_ABIO_W13_24", 
+           label = "additional vaginal ABX after intervention", 
+           type = "integer", group = "ABIO"),
+    tibble(var = "ADD_O_ABIO_W1_12", 
+           label = "additional oral ABX during intervention", 
+           type = "integer", group = "ABIO"),
+    tibble(var = "ADD_O_ABIO_W12_24", 
+           label = "additional oral ABX after intervention", 
+           type = "integer", group = "ABIO")
+  ) %>% distinct()
+
+tmp <- 
+  events |> 
+  group_by(USUBJID) %>% 
+  summarize(
+    ADD_V_ABIO_W1_12 = 
+      sum((VARIABLE == "Vaginal antibiotics") & (DAY <= 7*11)), 
+    ADD_V_ABIO_W13_24 = 
+      sum((VARIABLE == "Vaginal antibiotics") & (DAY > 7*11)),
+    ADD_O_ABIO_W1_12 = 
+      sum((VARIABLE == "Oral antibiotics") & (DAY <= 7*11)), 
+    ADD_O_ABIO_W13_24 = 
+      sum((VARIABLE == "Oral antibiotics") & (DAY > 7*11)),
+    .groups = "drop"
+    ) 
+
+subjects <- 
+  subjects %>% 
+  left_join(tmp, by = "USUBJID") %>% 
+  mutate(
+    ADD_V_ABIO_W1_12 = ADD_V_ABIO_W1_12 |>  replace_na(0),
+    ADD_V_ABIO_W13_24 = ADD_V_ABIO_W13_24 |>  replace_na(0),
+    ADD_O_ABIO_W1_12 = ADD_O_ABIO_W1_12 |> replace_na(0),
+    ADD_O_ABIO_W13_24 = ADD_O_ABIO_W13_24 |> replace_na(0)
+    )
+
+```
+
+
+
+### Sexual behavior
+
+We summarize sexual behavior of participants throughout the study.
+Specifically, sexual frequencies (number of sexual intercourse) with and without condoms in week 1, weeks 2-4, weeks 5-8, and weeks 9-12, and week 13-24.
+
+```{r}
+
+variable_info <- 
+  variable_info |> 
+  bind_rows(
+    bind_rows(
+      tibble(var = "CNDM_SEX_W1", label = "Nb of sex with condom in week 1"),
+      tibble(var = "CNDM_SEX_W2_4", label = "Nb of sex with condom in weeks 2-4"),
+      tibble(var = "CNDM_SEX_W5_8", label = "Nb of sex with condom in weeks 5-8"),
+      tibble(var = "CNDM_SEX_W9_12", label = "Nb of sex with condom in weeks 9-12"),
+      tibble(var = "CNDM_SEX_W13_24", label = "Nb of sex with condom from week 13"),
+      tibble(var = "CNDMLESS_SEX_W1", label = "Nb of sex without condom in week 1"),
+      tibble(var = "CNDMLESS_SEX_W2_4", label = "Nb of sex without condom in weeks 2-4"),
+      tibble(var = "CNDMLESS_SEX_W5_8", label = "Nb of sex without condom in weeks 5-8"),
+      tibble(var = "CNDMLESS_SEX_W9_12", label = "Nb of sex without condom in weeks 9-12"),
+      tibble(var = "CNDMLESS_SEX_W13_24", label = "Nb of sex without condom  from week 13")
+    )
+    |> mutate(type = "integer", group = "Sex")
+  ) |> 
+  distinct()
+
+tmp <- 
+  events %>% 
+  group_by(USUBJID) %>% 
+  summarize(
+    CNDM_SEX_W1 = sum((VARIABLE == "Sex with condoms") & (DAY %in% 1:7)),
+    CNDM_SEX_W2_4 = sum((VARIABLE == "Sex with condoms") & (DAY %in% 8:28)),
+    CNDM_SEX_W5_8 = sum((VARIABLE == "Sex with condoms") & (DAY %in% 29:56)),
+    CNDM_SEX_W9_12 = sum((VARIABLE == "Sex with condoms") & (DAY %in% 57:84)),
+    CNDM_SEX_W13_24 = sum((VARIABLE == "Sex with condoms") & (DAY >= 85)),
+    CNDMLESS_SEX_W1 = sum((VARIABLE == "Sex without condoms") & (DAY %in% 1:7)),
+    CNDMLESS_SEX_W2_4 = sum((VARIABLE == "Sex without condoms") & (DAY %in% 8:28)),
+    CNDMLESS_SEX_W5_8 = sum((VARIABLE == "Sex without condoms") & (DAY %in% 29:56)),
+    CNDMLESS_SEX_W9_12 = sum((VARIABLE == "Sex without condoms") & (DAY %in% 57:84)),
+    CNDMLESS_SEX_W13_24 = sum((VARIABLE == "Sex without condoms") & (DAY >= 85)),
+    .groups = "drop"
+    ) 
+
+subjects <- 
+  subjects %>% 
+  left_join(tmp, by = "USUBJID") %>% 
+  mutate(across(.cols = contains("_SEX_"), \(x) replace_na(x, 0)))
+
+```
+
+
+
+
+
+### Adherence
+
+We also summarize the adherence data at the participant's level. 
+
+
+```{r}
+
+variable_info <- 
+  variable_info |> 
+  bind_rows(
+    bind_rows(
+      tibble(var = "DOSES_W1", label = "Nb of doses in week 1"),
+      tibble(var = "DOSES_W2_4", label = "Nb of doses in weeks 2-4"),
+      tibble(var = "DOSES_W5_8", label = "Nb of doses in weeks 5-8"),
+      tibble(var = "DOSES_W9_12", label = "Nb of doses in weeks 9-12"),
+      tibble(var = "DOSES_W13_24", label = "Nb of doses from week 13")
+    )
+    |> mutate(type = "integer", group = "Doses")
+  ) |> 
+  distinct()
+
+tmp <- 
+  events %>% 
+  group_by(USUBJID) %>% 
+  summarize(
+    DOSES_W1 = sum((VARIABLE == "Dose") & (DAY %in% 1:7)),
+    DOSES_W2_4 = sum((VARIABLE == "Dose") & (DAY %in% 8:28)),
+    DOSES_W5_8 = sum((VARIABLE == "Dose") & (DAY %in% 29:56)),
+    DOSES_W9_12 = sum((VARIABLE == "Dose") & (DAY %in% 57:84)),
+    DOSES_W13_24 = sum((VARIABLE == "Dose") & (DAY >= 85)),
+    .groups = "drop"
+    ) 
+
+subjects <- 
+  subjects %>% 
+  left_join(tmp, by = "USUBJID") %>% 
+  mutate(across(.cols = contains("DOSES_W"), \(x) replace_na(x, 0)))
+
+```
+
+
+We also check that the `NUMDOSE` variable in the `subjects` table matches the total number of doses in the `events` table.
+
+```{r}
+
+# we check that numdoses in the subjects table matches the doses here
+
+check <- 
+  events %>% 
+  group_by(USUBJID) %>% 
+  summarize(numdoses = sum(VARIABLE == "Dose")) %>% 
+  left_join(subjects %>% select(USUBJID, NUMDOSE), by = "USUBJID")  %>% 
+  filter(numdoses > 0) |> 
+  ungroup() %>% 
+  summarize(numdose_match = all(NUMDOSE == numdoses))
+
+check
+
+```
+
+
+
+
+
+### Birth control
+
+We summarize participant's birth control based on the data collected in the `events` table.
+Specifically, we keep two summarizing variables: the birth control of participants throughout the trial, and the birth control of participants 
+
+```{r}
+
+variable_info <- 
+  variable_info |> 
+  bind_rows(
+    bind_rows(
+      tibble(var = "BC_W1_24", label = "Birth control throughout the trial"),
+      tibble(var = "BC_W1_12",label = "Birth control until week 12")
+    )
+    |> mutate(type = "character", group = "Birth Control")
+  ) |> 
+  distinct()
+
+BC_events <- 
+  events |> 
+  filter(CATEGORY == "Birth control") |>  
+  select(USUBJID, DAY, VARIABLE, VALUE)|> 
+  rename(BC = VARIABLE, BC_detail = VALUE) 
+
+BC_levels <- 
+  c("Combined","P only","IUD (Non-hormonal)","IUD (Hormonal)", "Non-hormonal")
+
+# First, we check if there is only one BC for each day of each participant 
+
+tmp_daily <- 
+  BC_events |> 
+  filter(DAY >= 1) |> 
+  mutate(BC = BC |> factor(levels = BC_levels)) |> 
+  group_by(USUBJID, DAY) |> 
+  summarize(
+    n_BC_all = length(unique(BC)),
+    BC_all = BC |> sort() |> unique() |> str_c(collapse = ", "),
+    .groups = "drop"
+  ) |> 
+  mutate(
+    BCs = ifelse(str_detect(BC_all, ", Non-hormonal"), str_remove(BC_all, ", Non-hormonal"), BC_all),
+    n_BC = ifelse(str_detect(BC_all, ", Non-hormonal"), n_BC_all - 1, n_BC_all),
+    BC = ifelse(n_BC > 1, "Change", BCs)
+  ) |> 
+  arrange(-n_BC_all)
+
+if (sum(tmp_daily$n_BC > 1) > 1) stop("Check BC_events\n")
+
+# if Ok, we proceed
+
+tmp_daily <- 
+  BC_events |> 
+  filter(DAY >= 1) |> 
+  mutate(BC = BC |> factor(levels = BC_levels)) |> 
+  arrange(USUBJID, DAY, BC) |>
+  group_by(USUBJID, DAY) |> 
+  slice_head(n = 1) |>
+  ungroup() 
+  
+tmp <- 
+  tmp_daily |>
+  group_by(USUBJID) |>
+  summarize(
+    n_BC_all = length(unique(BC)),
+    BC_all = BC |> sort() |> unique() |> str_c(collapse = ", "),
+    
+    n_BC_W1_12 = length(unique(BC[DAY <= 7*12])),
+    BC_all_W1_12 = (BC[DAY <= 7*12]) |> sort() |> unique() |> str_c(collapse = ", "),
+    
+    BC_W1_24 = ifelse(n_BC_all > 1, "Change/Multiple", BC_all),
+    BC_W1_12 = ifelse(n_BC_W1_12 > 1, "Change/Multiple", BC_all_W1_12),
+    .groups = "drop"
+  ) |> 
+  arrange(-n_BC_all)
+
+
+subjects <- 
+  subjects %>% 
+  left_join(tmp |> select(USUBJID, BC_W1_24, BC_W1_12), by = "USUBJID") %>% 
+  mutate(across(.cols = contains("BC_W1"), \(x) replace_na(x, "unknown")))
+
+```
+
+
+
+### Perturbations
+
+
+```{r}
+
+variable_info <- 
+  variable_info |> 
+  bind_rows(
+    bind_rows(
+      tibble(var = "BLEEDING", label = "Nb of menstrual bleeding days throughout the trial"),
+      tibble(var = "BLEEDING_W1_12",label = "Nb of menstrual bleeding days until week 12")
+    ) |> mutate(type = "integer", group = "Menstrual bleeding"),
+    bind_rows(
+      tibble(var = "DOUCHING", label = "Nb of days participant douched throughout the trial"),
+      tibble(var = "DOUCHING_W1_12",label = "Nb ofdays participant douched until week 12")
+    ) |> mutate(type = "integer", group = "Douching")
+  ) |> 
+  distinct()
+
+tmp <- 
+  events |>
+  group_by(USUBJID) |>
+  summarize(
+    BLEEDING = sum(VARIABLE == "Menstruation"),
+    BLEEDING_W1_12 = sum((VARIABLE == "Menstruation") & (DAY <= 7*12)),
+    DOUCHING = sum(VARIABLE == "Douching"),
+    DOUCHING_W1_12 = sum((VARIABLE == "Douching") & (DAY <= 7*12)),
+    .groups = "drop"
+  ) 
+
+subjects <- 
+  subjects %>% 
+  left_join(tmp, by = "USUBJID") %>% 
+  mutate(across(.cols = c(contains("BLEEDING"), contains("DOUCHING")), \(x) replace_na(x, 0)))
+
+```
+
+
+
+
+# Visits data (`visits` table)
+
+We now create a table with one row per visit. This table will contain visit-specific data that is contained in several tables depending on the domain and/or
+CRFs as well as visit-level summaries of the `events` table.
+
+The tables containing visit-level data are:
+
+-   `ADCE`: Clinical events. It contains information from the baseline assessment
+    and each following clinical assessment. The parameter categories assessed
+    included abnormal discharges and cervical mucus information.
+
+-   `ADDA`: Drug accountability. The ADDA dataset contains information about the
+    number of used and unused applicators throughout the study. It also contains
+    information about staining results and subject reports of the number of
+    doses taken.
+
+-   `ADEF`: Efficacy. The ADEF dataset contains data regarding the efficacy of
+    the study product. It contains information on Amsel criteria, BV diagnoses,
+    colonization of L. crispatus, and nugent criteria.
+
+-   `ADEFDY`: Days to Efficacy. Days since the last dose of study product and
+    colonization status are recorded in ADEFDY.
+
+-   `ADLB` (Laboratory Analysis ), `ADQS` (Questionnaires), `ADSX` (Sexual history),
+    `ADVS` (Vital signs)
+
+## Visit dates
+
+We use the `ADSX` table to retrieve the visit dates because this table also
+contains relative dates (study day) for the phone visits.
+
+```{r}
+
+visit_dates <- get_visit_dates()
+
+visits <-  visit_dates$visits
+
+factor_values <- bind_rows(factor_values, visit_dates$factor_values) %>% distinct()
+variable_info <- bind_rows(variable_info, visit_dates$variable_info) %>% distinct()
+
+```
+
+```{r}
+
+plot_visit_dates(visits = visits, subjects = subjects)
+
+```
+
+## BV diagnosis
+
+The information regarding BV diagnosis is contained in the `ADEF` table.
+
+```{r}
+
+BV_diagnosis <- get_BV_diagnosis()
+
+visits <- 
+  visits %>% 
+  left_join(BV_diagnosis$BV_diagnosis, by = c("USUBJID", "AVISITN"))
+
+factor_values <- 
+  bind_rows(factor_values, BV_diagnosis$factor_values) %>% distinct()
+variable_info <- 
+  bind_rows(variable_info, BV_diagnosis$variable_info) %>% distinct()
+
+
+```
+
+```{r}
+
+plot_BV_diagnosis(
+  visits = visits, subjects = subjects, 
+  show = "BV", sort_by = "n_BV"
+  )
+
+
+plot_BV_diagnosis(
+  visits = visits, subjects = subjects, 
+  show = "NUGENT", sort_by = "n_BV"
+  )
+
+plot_BV_diagnosis(
+  visits = visits, subjects = subjects, 
+  show = "NUGENT", sort_by = "tot_nugent"
+  )
+
+
+```
+
+```{r}
+
+plot_Amsel_vs_Nugent(visits)
+
+```
+
+The red area represents the criteria for receiving a BV diagnosis.
+
+### Detailed Nugent scores
+
+The table `RS` contains detailed Nugent scores (i.e., the scores for each "type"
+of bacteria).
+
+> `NOTE: for the participant "STI.00386", rows are duplicated for visit #2`
+
+```{r}
+
+Nugent_scores <- get_detailed_nugent_scores()
+
+visits <- 
+  visits %>% 
+  left_join(Nugent_scores$detailed_nugent_scores, 
+            by = c("USUBJID", "AVISITN"))
+
+variable_info <- 
+  bind_rows(variable_info, Nugent_scores$variable_info) %>% distinct()
+
+
+```
+
+```{r}
+
+plot_nugent_sub_scores(visits = visits)
+
+```
+
+
+## Number of days since last planned in-person visit
+
+For the downstream analyses, we'll evaluate the associations between various behavioral variables and the microbiota outcomes. Some of these behaviors may be better represented or compared in terms of rate (rather than absolute frequency). To compute these rates, we need to compute the denominator, which is the number of days since the last planned in-person visit.
+
+```{r}
+
+
+visits <- 
+  visits |> 
+  arrange(USUBJID, AVISITN) |> 
+  group_by(USUBJID) |>
+  mutate(
+    # LPIPV = Last Planned In-Person Visit
+    LPIPV = lag(AVISITN) |> floor(),
+    LPIPV = ifelse(LPIPV %in% 5:6, 4, LPIPV) |> as.integer()
+  ) |> 
+  ungroup() 
+
+planned_visits_days <- 
+  visits |> 
+  filter(PIPV) |> 
+  select(USUBJID, AVISITN, DAY) |> 
+  arrange(USUBJID, AVISITN) |> 
+  rename(
+    LPIPV = AVISITN,
+    DAY_LPIPV = DAY
+    ) 
+  
+visits <- 
+  visits |> 
+  left_join(planned_visits_days, by = join_by(USUBJID, LPIPV)) |>
+  mutate(NDAY_LPIPV = DAY - DAY_LPIPV) 
+
+
+variable_info <- 
+  bind_rows(
+    variable_info, 
+    bind_rows(
+      tibble(var = "LPIPV",label = "Last planned in-person visit"),
+      tibble(var = "DAY_LPIPV", label = "Day of last planned in-person visit"),
+      tibble(var = "NDAY_LPIPV",label = "Days since last planned in-person visit")
+    ) |> 
+      mutate(
+        type = "integer",
+        group = "Events summaries"
+      )
+  ) |> 
+  distinct()
+
+```
+
+The distribution of days since last planned visit goes as follow:
+
+```{r}
+
+visits |> 
+  filter(AVISITN %in% c(1:7)) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = NDAY_LPIPV)) +
+  geom_histogram(binwidth = 1) +
+  facet_grid(Visit ~ ., scales = "free_y", labeller = label_both) +
+  xlab("Days since last planned in-person visit") +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0))
+
+```
+
+
+
+
+## Summaries from the `events` table.
+
+
+We will now add columns to the `visits` table that summarize the events that have happened since the last planned in-person visit. 
+
+For example, for participant `"STI.00185"`, her time-line of events, with the visits day highlighted looks like this: 
+
+
+```{r}
+
+# Viz
+
+plot_participant_events(events %>% filter(USUBJID == "STI.00185")) +
+  geom_vline(data = visits %>% filter(USUBJID == "STI.00185"), 
+             aes(xintercept = DAY/7), linetype = 3, linewidth = 0.3)
+
+```
+
+
+### Days since last dose and number of doses since last planned in-person visit
+
+#### Days since last dose
+
+
+```{r}
+
+days_since_last_dose <- get_days_since_last_dose(visits, events)
+
+variable_info <- 
+  bind_rows(variable_info, days_since_last_dose$variable_info) |> distinct()
+
+visits <- 
+  visits |> 
+  left_join(
+    days_since_last_dose$days_since_last_dose, 
+    by = c("USUBJID", "AVISITN")
+  )
+
+```
+
+The distribution of days since last dose goes as follow:
+
+```{r}
+
+visits |>
+  filter(OPIPV) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = LAST_DOSE)) +
+  geom_histogram(binwidth = 1) +
+  facet_grid(Visit ~ ., scales = "free_y", labeller = label_both) +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0))
+
+```
+
+We note that the `ADEFY` table also contained this variable, but only for the planned in-person visits. For sanity check, we verify that the variable we computed is the same as the one computed by Emmes.
+
+```{r}
+
+get_days_since_last_dose_ADEFDY() |> 
+  rename(LAST_DOSE_ADEFY = LAST_DOSE) |>
+  left_join(
+    visits |> select(USUBJID, AVISITN, LAST_DOSE),
+    by = join_by(USUBJID, AVISITN)
+  ) |> 
+  summarize(same_values = all(LAST_DOSE == LAST_DOSE_ADEFY, na.rm = TRUE))
+ 
+
+```
+
+
+
+#### Number of doses since last planned in-person visit
+
+```{r}
+
+n_doses_since_LPIPV <- get_doses_since_LPIPV(visits, events)
+
+variable_info <- 
+  bind_rows(variable_info, n_doses_since_LPIPV$variable_info) %>% distinct()
+
+visits <- 
+  visits %>% 
+  left_join(
+    n_doses_since_LPIPV$summary,  
+            by = c("USUBJID", "AVISITN")
+    )
+
+```
+
+
+The distribution of number of doses since last planned in-person visits goes as follow:
+
+```{r}
+#| fig-height: 4
+
+visits |>
+  filter(OPIPV) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = N_DOSES_LPIPV)) +
+  geom_histogram(binwidth = 1) +
+  facet_grid(Visit ~ ., labeller = label_both, scales = "free_y") +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
+  xlab("Number of doses since last planned in-person visit")
+
+```
+
+We also computed the number of doses expected to have been taken by the visit day, assuming that the participant took all doses as planned. So we can compare this number to the number of doses actually taken.
+
+```{r}
+#| fig-height: 3.5
+
+visits |>
+  filter(OPIPV) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = N_PP_DOSES_LPIPV, y = N_DOSES_LPIPV)) +
+  geom_abline(col = "gray") +
+  geom_jitter(size = 0.25, alpha = 0.5, height = 0.2, width = 0.2) +
+  facet_grid(. ~ Visit, labeller = label_both) +
+  coord_fixed() +
+  xlab("Number of doses expected to have been taken") +
+  ylab("Number of doses\nactually taken")
+
+
+
+```
+
+
+
+#### Adherence rate and number of missed doses
+
+Because not all participants have the same number of days between their visits, it is useful to compute a few additional metrics:
+
+- the adherence rate, which is the number of doses taken divided by the number of days between the last planned in-person visit and the current visit;
+
+- the number of missed doses, which is the difference between the number of doses actually taken and the number of doses expected to have been taken if participant took all the planned doses.
+
+```{r}
+
+visits <- 
+  visits |> 
+  mutate(
+    WR_DOSE_LPIPV = N_DOSES_LPIPV / (NDAY_LPIPV / 7),
+    N_MISSED_DOSES = N_PP_DOSES_LPIPV - N_DOSES_LPIPV,
+    FPP_DOSE_LPIPV = N_DOSES_LPIPV / N_PP_DOSES_LPIPV
+  )
+
+```
+
+The distribution of adherence rate goes as follow:
+
+```{r}
+
+visits |>
+  filter(OPIPV) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = WR_DOSE_LPIPV)) +
+  geom_histogram(bins = 30) +
+  facet_grid(Visit ~ ., scales = "free_y", labeller = label_both)  +
+  xlab("Adherence rate (in doses/week)")
+
+```
+
+And the distribution of the number of missed doses goes as follow:
+
+```{r}
+
+visits |>
+  filter(OPIPV) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = N_MISSED_DOSES)) +
+  geom_histogram(binwidth = 1) +
+  facet_grid(Visit ~ ., scales = "free_y", labeller = label_both)  +
+  xlab("Number of missed doses")
+
+```
+
+Negative numbers indicate that the participant took more doses than expected. 
+
+
+### Menstruation
+
+We record if participant is menstruating at the visit, when was the last
+menstrual bleeding day, and how many bleeding days they had since their last planned in-person visit.
+
+```{r}
+
+menstruation_summary <- get_menstruation_summary(visits, events)
+
+variable_info <- 
+  bind_rows(variable_info, menstruation_summary$variable_info) |>  distinct()
+
+visits <- 
+  visits |> 
+  left_join(menstruation_summary$summary, by = c("USUBJID", "AVISITN"))
+
+```
+
+
+The distribution of number of bleeding days since last planned in-person visit goes as follow:
+
+```{r}
+
+g_n_bleeding_days_since_LPIPV <- 
+  visits |> 
+  filter(OPIPV) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = N_BLEED_LPIPV)) +
+  geom_histogram(binwidth = 1, fill = "tomato") +
+  facet_grid(Visit ~ ., labeller = label_both) +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
+  xlab("Number of bleeding days\nsince last planned in-person visit")
+
+g_days_since_last_bleeding <- 
+  visits |> 
+  filter(OPIPV) |> 
+  mutate(Visit = AVISITN) |> 
+  ggplot(aes(x = LAST_M)) +
+  geom_histogram(binwidth = 1, fill = "tomato") +
+  facet_grid(Visit ~ ., labeller = label_both) +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
+  xlab("Number of days\nsince last menstrual bleeding")
+  
+g_n_bleeding_days_since_LPIPV + g_days_since_last_bleeding
+
+```
+
+
+### Birth control
+
+We summarize the participant birth control method at the current visit and if any changes since the last planned in-person visit
+
+```{r}
+
+BC_summary <- get_BC_summary(visits, events)
+
+variable_info <- bind_rows(variable_info, BC_summary$variable_info) |> distinct()
+visits <- visits |> left_join(BC_summary$summary, by = join_by(USUBJID, AVISITN))
+
+BC_summary$summary |> count(BC) |> knitr::kable(caption = "Number of visits by birth control method")
+
+
+BC_summary$summary |> count(BC_CHANGE) |> knitr::kable(caption = "Number of visits where participants changed birth control since their last visit")
+
+```
+
+
+### Concomitant medication
+
+In this section, we summarize the participant's use of concomitant medication since the last planned in-person visit.
+
+
+```{r}
+
+CM_use_LPIPV <- get_visit_CM_use_LPIPV(visits, events)
+
+# deprecated: CM_use <- get_visit_CM_use(visits = visits, events = events)
+
+visits <- visits |> left_join(CM_use_LPIPV$CM_use, by = join_by(USUBJID, AVISITN)) 
+variable_info <- bind_rows(variable_info, CM_use_LPIPV$variable_info) |> distinct()
+
+```
+
+```{r}
+
+visits |> 
+  filter(!is.na(LAST_V_ABIO), AVISITN %in% c(2:4,7)) |> 
+  ggplot(aes(x = LAST_V_ABIO, y = USUBJID)) +
+  geom_point(aes(size = N_SINCE_LPIPV_V_ABIO), alpha = 0.5) +
+  facet_grid(. ~ AVISITN)
+
+```
+
+
+
+### Sexual behavior since last planned in-person visit
+
+Similarly as for the doses received by participants, we summarize the sexual behavior since the last planned in-person visit. 
+
+Specifically, we want to document
+
+- the total number of days (and rate) with vaginal intercourse since last PIPV
+
+- the number of days (and rate) with condom-protected vaginal intercourse since last PIPV
+
+- the number of days (and rate) with condomless vaginal intercourse since last PIPV
+
+- the number of days since any vaginal sexual activity
+
+- the number of days since any condomless vaginal sexual activity
+
+- the number of days since any condom-protected vaginal sexual activity
+
+- the number of new sexual partner since last PIPV
+
+
+All but the last item can be computed from the `events` table. The last one can be found in the `ADSX` table which reports the answers to the follow-up sexual history CRF (GSH question 3).
+
+So, we first compute the metrics from the `events` table, then retrieve the information from the `ADSX` table, so we can compare them (for sanity check), and finally merge the two.
+
+#### Metrics from the `events` table 
+
+```{r}
+ 
+sexual_activity_visit_summary <-  get_sex_events_since_LPIPV(visits, events)
+
+```
+
+We can visualize the distribution of the rate of any sexual intercourse since last PIPV:
+
+```{r}
+
+sexual_activity_visit_summary$summary |> 
+  filter(AVISITN %in% c(2:4,7)) |>
+  ggplot(aes(x = R_SINCE_LPIPV_SEX)) + 
+  geom_histogram(bins = 50) + 
+  facet_grid(AVISITN ~ .) +
+  xlab("Rate (= #/day) of sexual intercourse since last PIPV")
+
+```
+
+
+#### Metrics from the `ADSX` table
+
+```{r}
+
+sex_summary_AD <- get_sex_summary_AD()
+
+```
+
+The `ADSX` table contains the answers to the following questions:
+
+```{r}
+
+sex_summary_AD$PARAM |> unique()
+
+```
+
+#### Comparison of the daily log answers with the "monthly" follow-up questionaire answers
+
+*Time since last sexual intercourse*
+
+```{r}
+#| fig-height: 4
+
+sexual_activity_visit_summary$summary |> 
+  select(USUBJID, AVISITN, LAST_SEX) |> 
+  left_join(
+    sex_summary_AD |> filter(str_detect(PARAM, "How many days")),
+    by = join_by(USUBJID, AVISITN)
+  ) |> 
+  mutate(AVALC = as.numeric(AVALC)) |>
+  filter(AVISITN %in% c(2:4,7)) |> 
+  ggplot(aes(x = LAST_SEX, y = AVALC)) +
+  geom_abline(col = "gray") +
+  geom_jitter(size = 0.2, alpha = 0.4, height = 0.2, width = 0.2) +
+  facet_grid(. ~ AVISITN, labeller = label_both, scales = "free", space = "free") +
+  xlab("Days since last sex from daily logs") +
+  ylab("Days since last sex from visit survey")
+
+```
+
+
+*Number of sexual intercourse since last visit*
+
+```{r}
+#| fig-height: 4
+
+sexual_activity_visit_summary$summary |> 
+  select(USUBJID, AVISITN, N_SINCE_LPIPV_SEX) |> 
+  left_join(
+    sex_summary_AD |> filter(str_detect(PARAM, "How many times")),
+    by = join_by(USUBJID, AVISITN)
+  ) |> 
+  mutate(AVALC = as.numeric(AVALC)) |>
+  filter(AVISITN %in% c(2:4,7)) |> 
+  ggplot(aes(x = N_SINCE_LPIPV_SEX, y = AVALC)) +
+  geom_abline(col = "gray") +
+  geom_jitter(size = 0.2, alpha = 0.4, height = 0.2, width = 0.2) +
+  facet_grid(. ~ AVISITN, labeller = label_both, scales = "free", space = "free") +
+  xlab("Number of sexual intercourse since last visit from daily logs") +
+  ylab("Number of sexual intercourse since last visit from visit survey")
+
+```
+
+
+Overall, we have relatively good agreement between the two.
+
+#### Merging the two table
+
+We keep the sexual frequency and time since last sex from the daily surveys, and the number of new partners from the visit survey.
+
+```{r}
+
+n_new_partners <- 
+  sex_summary_AD |> 
+  filter(str_detect(PARAM, "partners")) |> 
+  mutate(N_NEW_PARTNERS = AVALC |> as.integer()) |> 
+  select(USUBJID, AVISITN, N_NEW_PARTNERS)
+  
+
+sexual_activity_visit_summary$summary <-
+  sexual_activity_visit_summary$summary |> 
+  left_join(n_new_partners, by = join_by(USUBJID, AVISITN)) |> 
+  mutate(
+    N_NEW_PARTNERS = 
+      ifelse((AVISITN > 1) & is.na(N_NEW_PARTNERS), 0, N_NEW_PARTNERS)
+    )
+
+visits <- 
+  visits |> 
+  left_join(sexual_activity_visit_summary$summary, by = join_by(USUBJID, AVISITN)) 
+
+variable_info <- 
+  bind_rows(
+    variable_info, 
+    sexual_activity_visit_summary$variable_info,
+    tibble(
+      var = "N_NEW_PARTNERS", 
+      label = "Number of new partners since last visit", 
+      type = "integer", group = "Sexual behavior"
+    )
+  ) |> 
+  distinct()
+
+
+```
+
+We also add the number of new partners to the `subjects` table
+
+```{r}
+
+tmp <- 
+  visits |> 
+  group_by(USUBJID) |>
+  summarize(N_NEW_PARTNERS_W1_12 = sum(N_NEW_PARTNERS, na.rm = TRUE), .groups = "drop")
+
+variable_info <- 
+  bind_rows(
+    variable_info, 
+    tibble(
+      var = "N_NEW_PARTNERS_W1_12", 
+      label = "Number of new partners until week 12", 
+      type = "integer", group = "Sexual behavior"
+    )
+  ) |> 
+  distinct()
+
+subjects <- 
+  subjects |> 
+  left_join(tmp, by = "USUBJID") |> 
+  mutate(N_NEW_PARTNERS_W1_12 = ifelse(is.na(N_NEW_PARTNERS_W1_12), 0, N_NEW_PARTNERS_W1_12))
+
+```
+
+
+The distribution of new partners per participant is:
+
+```{r}
+#| fig-height: 3
+
+ggplot(subjects, aes(x = N_NEW_PARTNERS_W1_12)) +
+  geom_histogram(binwidth = 0.5) +
+  xlab("Total number of new partners\nfrom week 1 to week 12 (incl.)") +
+  ylab("Number of participants")
+
+```
+
+
+
+
+### Last event before planned in-person visit
+
+
+We also summarize which event was the last one before the planned in-person visit.
+
+
+```{r}
+
+last_event <- get_last_event_before_visit(visits)
+
+visits <- visits |> left_join(last_event$summary, by = join_by(USUBJID, AVISITN)) 
+variable_info <- bind_rows(variable_info, last_event$variable_info) |> distinct()
+
+```
+
+The distribution of these events are:
+
+```{r}
+
+last_event$summary |> 
+  pivot_longer(ends_with("_IS_LAST"), names_to = "event", values_to = "is_last") |> 
+  filter(is_last, AVISITN %in% c(2:4,7)) |>
+  count(AVISITN, event) |> 
+  arrange(AVISITN, n) |> 
+  mutate(event = event |> factor(levels = unique(event)), Visit = AVISITN) |> 
+  ggplot(aes(y = event, x = n)) +
+  geom_bar(stat = "identity") +
+  facet_grid(. ~ Visit, labeller = label_both)
+
+```
+
+
+# Swabs: Collected, shippable, and shipped swabs
+
+The file
+`2. Global Trace samples - incl site ID, collection date, visit number.xlsx` in
+the `00_raw/sample_inventory/` directory contains the list of **collected** swab together with the participant ID, and the visit number.
+
+The file `LactinV_Dec02_2020_specimeninventory from Maira 09.2021.xlsx` (in the same directory)
+contains the list of swabs that were **shipped** for sequencing, etc.
+
+```{r}
+
+swabs <- get_swab_info(dropbox_dir = data_dir())
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+#| echo: false
+
+dir <- "../../Omics_samples/potential_issues_with_shipped_swabs/"
+
+swabs_shipped %>% 
+  left_join(ADSL %>%  select(USUBJID, ARM)) %>% 
+  filter(!(ARM %in% c("LACTIN-V", "Placebo" ))) %>% 
+  write_csv(., file = str_c(dir, "shipped_swabs_no_treatment.csv"))
+
+GT %>% filter(SN %in% c("202302828","202302744"))  %>% 
+  write_csv(., file = str_c(dir,"swabs_not_in_clin_database.csv"))
+
+```
+
+## Collected swabs
+
+```{r}
+
+coll <- 
+  swabs$all_swabs |> 
+  left_join(subjects |> select(USUBJID, ARM), by = join_by(USUBJID))
+
+```
+
+
+The collected swab table (inventory) contains data for `r nrow(coll)` swabs.
+
+That table has several columns characterizing collected swabs: `r colnames(swabs$all_swabs)`.
+
+> TODO: check with Anke/Craig the meaning of these columns, and specifically the meaning of the `STATUS`, `ST`, `SP`, and  `STORAGE` columns.
+
+Among these columns, some appear to be of particular interest. We visualize collected swabs colored by these columns:
+
+
+```{r}
+#| fig.height: 9
+
+plot_swab_inventory(coll, color = "STATUS")
+
+plot_swab_inventory(coll, color = "STORAGE") 
+
+```
+
+From these visualizations, my interpretation is that:
+
+- the `SP` column indicates the purpose of the swab collection: I assume that "GRM" is for gram staining (Nugent score evaluation), "PCR" is for PCR, and "YFU" is for "Y"? follow-up analyses.
+
+I assume that the **"shippable" swabs** (*i.e.*, swabs that could be shipped to the Kwon lab for running the various assays) are the ones with `SP` equal to "YFU".
+
+- I'm not sure what the `STATUS` column indicate, but only very few "YFU" swabs from randomized participants have the "N" value. Maybe we'd need to filter out the "N" values from the "shippable" swabs.
+
+
+- The `ST` column seems to be redundant with the `SP` column while having less values: "SLD" matches "GRM" and "VSW" matches "PCR" and "YFU".
+
+```{r}
+
+coll |> count(SP, ST) |> kable()
+
+```
+
+- I'm not sure if the `STORAGE` column is relevant to identify "shippable" swabs. Or if we should exclude the "NA" values from the "shippable" swabs.
+
+
+We can also visualize which swabs were shipped to the Kwon lab:
+
+```{r}
+
+coll_with_shipped <- 
+coll |> 
+  left_join(
+    swabs$shipped_swabs |> 
+      mutate(SN = Barcode |> as.character(), shipped = TRUE) |> 
+      rename(USUBJID_shipped = USUBJID, AVISITN_shipped = AVISITN), 
+    by = join_by(SN)) |>
+  mutate(shipped = replace_na(shipped, FALSE)) 
+
+```
+
+
+```{r}
+#| fig.height: 9
+plot_swab_inventory(coll_with_shipped, color = "shipped")
+```
+
+As expected from our interpretation of the columns above, the swabs that were shipped to the Kwon lab are the ones with `SP` equal to "YFU".
+
+```{r}
+
+coll_with_shipped |> 
+  count(shipped, SP, ARM) |> 
+  kable(caption = "Number of swabs by treatment arm, 'SP', and whether they were shipped to the Kwon lab")
+
+```
+
+## Shippable swabs
+
+Based on these observations, we define "shippable" swabs as swabs from randomized participants with `SP` equal to "YFU" and `STATUS` equal to "A".
+
+> TODO: confirm with Anke/Craig the meaning of the `STATUS` column + if there is any other information that would make a collected swab non-shippable.
+
+```{r}
+
+shippable_swabs <- 
+  coll_with_shipped |> 
+  filter(!is.na(ARM), SP == "YFU", STATUS == "A") |> 
+  select(USUBJID, ARM, AVISITN, SN, Barcode, shipped, STORAGE, COMMENT) |> 
+  distinct() |> 
+  arrange(ARM, USUBJID, AVISITN, Barcode)
+
+```
+
+
+There was a total of `r nrow(shippable_swabs)` shippable swabs.
+
+We saw earlier that some of the "shippable" swabs were not shipped to the Kwon lab.
+Specifically: `r nrow(shippable_swabs) - sum(shippable_swabs$shipped)` swabs were not shipped.
+
+```{r}
+
+shippable_swabs |> count(shipped) |> 
+  kable(caption = 'Number of "shippable" swabs that were shipped or not')
+
+```
+
+
+### Table of missing shippable swabs
+
+
+We can check how many of these were redundant with swabs collected from the same individuals and visits and how many unique visits we are missing.
+
+
+```{r}
+
+swabs_visit_summary <- 
+  shippable_swabs |> 
+  left_join(subjects |> select(USUBJID, SITENAME), by = join_by(USUBJID)) |> 
+  group_by(USUBJID, SITENAME, ARM, AVISITN)  |>  
+  summarize(
+    n_shippable_swabs = n(),
+    n_shipped_swabs = sum(shipped),
+    swab_barcodes = str_c(SN |> str_replace_na("") |> unique(), collapse = ", "),
+    comments = str_c(COMMENT |> str_replace_na("") |> unique(), collapse = ", "),
+    .groups = "drop"
+  ) |>
+  select(SITENAME, ARM, USUBJID, everything()) 
+
+
+```
+
+
+```{r}
+
+swabs_visit_summary |> 
+  arrange(SITENAME, ARM, USUBJID, AVISITN) |> 
+  filter(n_shipped_swabs == 0) |> 
+  kbl(caption = 'List of participants and visits with at least one "shippable" swab but for which none were shipped') |> 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), font_size = 1)
+
+```
+
+
+There are `r sum(swabs_visit_summary$n_shipped_swabs == 0)` visits for which no swab was shipped.
+
+
+```{r}
+#| eval: false
+
+swabs_visit_summary |> 
+  arrange(SITENAME, ARM, USUBJID, AVISITN) |> 
+  filter(n_shipped_swabs == 0) |> 
+  group_by(SITENAME) |> 
+  gt(caption =  'List of participants and visits with at least one "shippable" swab but for which none were shipped')
+  
+```
+
+
+Many of these swabs are from the same participants for which none of their "shippable" swabs were shipped, and from participants enrolled at the WUSL and Chicago sites.
+
+
+```{r}
+#| fig.height: 9
+#| fig.width: 9
+
+swabs_visit_summary |> 
+  group_by(USUBJID) |> 
+  mutate(n_shipped = sum(n_shipped_swabs)) |> 
+  ungroup() |> 
+  arrange(-n_shipped) |> 
+  mutate(USUBJID = USUBJID |> factor(levels = unique(USUBJID))) |> 
+  ggplot(aes(y = USUBJID, x = AVISITN |> factor(), col = n_shipped_swabs |> factor())) +
+  geom_point(alpha = 0.5) +
+  xlab("Visits (all at which participants presented)") +
+  facet_grid(str_wrap(SITENAME, 25) + ARM ~ ., scales = "free", space = "free") +
+  scale_color_manual("# shipped swabs", values = c("red2","steelblue3", "steelblue4")) +
+  theme(
+    axis.text.y = element_text(size = 3),
+    strip.text.y = element_text(angle = 0, hjust = 0)
+    ) 
+
+```
+
+### Summary of "status" at visits
+
+We can summarize the "status" of the swabs at each visit.
+
+At each planned visit, we can have the following statuses:
+
+- "Planned visit": visit was planned but participant did not present
+
+- "Presented at visit": participant presented at visit but BV was not diagnosed and no swabs were collected.
+
+- "BV diagnosis": participant presented at visit and BV was diagnosed but no "shippable" swab was collected
+
+- "Shippable swab(s)": participant presented at visit and at least one "shippable" swab was collected. (note: BV diagnosis may not done even if shippable swabs were collected - typically at the pre- and post-MTZ visits)
+
+- "1 or 2 shipped swab(s)": participant presented at visit and one (or 2) swabs were shipped. (note: BV diagnosis may not done even if swabs were shipped - typically at the pre- and post-MTZ visits)
+
+
+
+```{r}
+
+all_visits <- 
+  bind_rows(
+    expand_grid(USUBJID = subjects$USUBJID, AVISITN = c(0:4,7)),
+    visits |> select(USUBJID, AVISITN, DAY, BV)
+  ) |> 
+  arrange(USUBJID, AVISITN, DAY, BV) |>
+  group_by(USUBJID, AVISITN) |> 
+  slice_head(n = 1) |>
+  ungroup() |> 
+  left_join(subjects |> select(USUBJID, ARM, SITENAME ), by = join_by(USUBJID)) |> 
+  left_join(
+    swabs_visit_summary |> 
+      select(USUBJID, AVISITN, n_shippable_swabs, n_shipped_swabs), 
+    by = join_by(USUBJID, AVISITN)
+    ) 
+
+
+visit_status_levels = 
+  c("Planned visit", "Presented at visit", "BV diagnosis", "Shippable swab(s)", "1 shipped swab", "2 shipped swabs", "PROBLEM!!!")
+
+visit_status_colors <- 
+  c("gray","gold", "orange", "tomato", "steelblue2", "steelblue4", "purple")
+  
+
+all_visits <- 
+  all_visits |> 
+  mutate(
+    Status = 
+      case_when(
+        (n_shipped_swabs == 2) ~ "2 shipped swabs",
+        (n_shipped_swabs == 1) ~ "1 shipped swab",
+        (n_shippable_swabs > 0) ~ "Shippable swab(s)",
+        BV %in% c("Yes", "No") ~ "BV diagnosis",
+        !is.na(DAY) & !(BV %in% c("Yes","No")) ~ "Presented at visit",
+        is.na(DAY) ~ "Planned visit",
+        TRUE ~ "PROBLEM!!!"
+      ) |> 
+      factor(levels = visit_status_levels)
+  )
+
+all_visits <- 
+  all_visits |> 
+  group_by(USUBJID) |> 
+  mutate(rank = 
+           sum(n_shipped_swabs + n_shippable_swabs + !is.na(DAY), na.rm = TRUE)) |>
+  ungroup() |> 
+  arrange(-rank) |> 
+  mutate(USUBJID = USUBJID |> factor(levels = unique(USUBJID)))
+
+```
+
+
+```{r}
+#| fig.height: 9
+#| fig.width: 9
+#| fig.cap: "Status of all visits for all randomized participants"
+
+plot_visit_status(all_visits) +   
+  scale_fill_manual(breaks = visit_status_levels, values = visit_status_colors)
+
+```
+
+
+
+```{r}
+#| fig.height: 9
+#| fig.width: 8
+#| fig.cap: "Status of all PIP visits for all randomized participants"
+
+plot_visit_status(all_visits|> filter(AVISITN %in% c(0:4,7))) +   
+  scale_fill_manual(breaks = visit_status_levels, values = visit_status_colors)
+
+```
+
+
+```{r}
+
+all_visits |> filter(AVISITN %in% c(0:4,7)) |> 
+  count(Status) |> 
+  kable(caption = "Number of visits per status for all PIP visits") |> 
+  kable_styling(full_width = FALSE)
+  
+```
+
+
+
+## Shipped swabs at Planned in-person visits
+
+
+
+The number of **shipped** swab at planned in-person visit for all randomized participant is as follow:
+
+```{r}
+
+swabs_per_visits <- 
+  swabs$shipped_swabs |> 
+  group_by(USUBJID, AVISITN)|> 
+  summarize(
+    N_SWABS = n(),
+    SWABS_ID = str_c(Barcode, collapse = ", "),
+    .groups = "drop"
+  ) 
+
+visits <- 
+  visits %>% 
+  left_join(swabs_per_visits, by = c("USUBJID", "AVISITN")) |> 
+  mutate(N_SWABS = ifelse(is.na(N_SWABS) & (PIPV) , 0, N_SWABS))
+
+variable_info <- 
+  variable_info |> 
+  bind_rows(
+    tibble(var = 'N_SWABS', label = "# of swabs collected and shipped per visit", type = "integer", group = 'Swabs'),
+     tibble(var = 'SWABS_ID', label = "Barcodes of visit swabs collected and shipped", type = "character", group = 'Swabs')
+  ) |> distinct()
+
+```
+
+```{r}
+#| fig.height = 6
+
+plot_n_swabs_per_visit(visits = visits, subjects = subjects, by = "ARM")
+plot_n_swabs_per_visit(visits = visits, subjects = subjects, by = "SITENAME")
+
+```
+
+
+```{r}
+
+get_swab_summary_table(visits, subjects) %>% 
+  knitr::kable(
+    caption = "Number of participants in each arm. (Swabs = shipped swabs)"
+    )
+
+```
+
+
+
+## `swabs` table (-omics master table)
+
+The `swabs` table is built from the `shipped_swabs` table, itself loaded from the `LactinV_Dec02_2020_specimeninventory from Maira 09.2021.xlsx` file).
+
+```{r}
+
+swabs <- swabs$shipped_swabs
+swabs <- swabs %>% mutate(Barcode = Barcode %>% as.character())
+
+```
+
+The `swabs` table has the list of all shipped swabs and has `r nrow(swabs)` rows.
+
+
+As we've seen above, we note that there are swabs from participants that were not randomized or even swabs that do not belong to any participants that were shipped:
+
+```{r}
+
+swabs |> 
+  left_join(
+    subjects |> select(USUBJID) |> mutate(in_subject_table = TRUE), 
+    by = join_by(USUBJID)
+    ) |> 
+  left_join(
+    ADSL |> select(USUBJID, ARM) |> mutate(in_ADSL_table = TRUE),
+    by = join_by(USUBJID)
+    ) |>
+  filter(is.na(in_subject_table)) |> 
+  mutate(USUBJID = ifelse(is.na(USUBJID),"ID not assigned", "ID assigned")) |>
+  count(ARM, USUBJID, name = "n swabs") |> 
+  arrange(-`n swabs`) |> 
+  knitr::kable()
+
+```
+
+These swabs were useful for testing the sequencing and Luminex protocol without wasting any relevant swabs.
+
+
+# Reproducing NEJM 2020's paper results.
+
+As a sanity check, we reproduce the results from the NEJM 2020 paper.
+
+
+## Table 2
+
+
+![](images/NEJM_table2.png)
+Table 2 from Cohen, et al. NEJM 2020 paper.
+
+### Week 12
+
+
+```{r}
+#| fig-height: 7
+
+week12 <- make_NEJM_table(subjects = subjects, visits = visits, target_visit = 4)
+week12$plot
+week12$table |> kable()
+
+```
+
+This is the same as the NEJM's table 2.
+
+
+### Week 24
+
+```{r}
+#| fig-height: 7
+
+week24 <- make_NEJM_table(subjects = subjects, visits = visits, target_visit = 7)
+week24$plot
+week24$table |> kable()
+
+```
+
+This is different than the NEJM's table 2: one participant is counted as "Missing" in the NEJM's table 2 but is counted as no rBV in our table. 
+
+> NDLaura: It looks like either I misunderstood the rules or that the "Missing" BV diagnosis are not treated the same at Week 12 and Week 24. I will need to check with the team.
+
+
+
+# Saving tables
+
+We now have our 4 core tables:
+
+-   `subjects`,
+
+-   `visits`,
+
+-   `events`,
+
+-   `swabs`
+
+and two tables providing description of the variables and possible values for
+the variables that are `factors`:
+
+-   `variable_info`
+
+-   `factor_values`
+
+These tables are exported on dropbox so that they can be used for downstream
+analyses.
+
+```{r}
+#| cache: false
+
+output_clin_dir <- 
+  str_c(data_dir(),"01_preprocessed/Clinical metadata/")
+if (!dir.exists(output_clin_dir)) dir.create(output_clin_dir)
+
+output_dir <- 
+  str_c(output_clin_dir,"output_", Sys.Date() |> str_remove_all("-"), "/")
+if (!dir.exists(output_dir)) dir.create(output_dir)
+
+
+ext <- ".RDS"
+
+saveRDS(subjects, file = str_c(output_dir, "subjects", ext))
+saveRDS(visits, file = str_c(output_dir, "visits", ext))
+saveRDS(events, file = str_c(output_dir, "events", ext))
+saveRDS(swabs, file = str_c(output_dir, "swabs", ext))
+saveRDS(variable_info, file = str_c(output_dir, "variable_info", ext))
+saveRDS(factor_values, file = str_c(output_dir, "factor_values", ext))
+
+```
+
+
+
+# Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>
+

@@ -1,0 +1,1738 @@
+---
+title: "Integration Microbiota and Cytokines"
+author: "Laura Symul"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    number-sections: true
+execute:
+  cache: true
+  warning: false
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+## Multitable analysis: relationships between Microbiota and cytokines/chemokines
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(ggrepel)
+library(ggcorrplot)
+library(MBViz) # devtools::install_github("lasy/MBViz")
+library(ggtext)
+library(factoextra)
+library(ade4)
+library(gt)
+library(DistatisR)
+library(ggforce)
+
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+theme_set(theme_publication())
+```
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(dir = str_c(data_dir(), "03_augmented_mae"))  
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame()
+
+```
+
+
+```{r}
+
+microbiota <- 
+  get_assay_wide_format(mae, "tax_16S_p") |> 
+  dplyr::rename(rel_ab = assay)
+
+topics <- 
+  get_assay_wide_format(mae, "c_topics_16S_8", add_colData = FALSE) |> 
+  dplyr::rename(topics = assay) 
+
+colnames(topics$topics) <- SummarizedExperiment::rowData(mae[["c_topics_16S_8"]])$topic_label
+
+cytokines <- 
+  get_assay_wide_format(mae, "cytokine_log10_SE_corrected_incl_cytokine", add_colData = FALSE) |> 
+  dplyr::rename(cytokines = assay)
+
+combined <- 
+  inner_join(microbiota, cytokines, by = join_by(Barcode)) |> 
+  left_join(topics |> select(topics, Barcode), by = join_by(Barcode))
+
+combined <- 
+  combined |> 
+  mutate(
+    # likely not needed, but useful/interesting for tests
+    rel_ab_scaled = rel_ab |> scale() |> as.data.frame(), 
+    cytokines_scaled = cytokines |> scale() |> as.data.frame()
+  )
+
+combined <- 
+  combined |> 
+  select(
+    USUBJID, AVISITN, ARM, rel_ab, cytokines, topics, rel_ab_scaled, cytokines_scaled,  everything()
+  )
+
+```
+
+
+
+```{r}
+
+block_colors <- c( `Microbiota\nsub-communities` = "indianred1", cytokines = "darkslateblue", `Microbiota topics` = "indianred1")
+
+```
+
+### RV coefficient
+
+First, we compute the RV coefficient between the two tables.
+
+RV-coefficient: https://en.wikipedia.org/wiki/RV_coefficient
+
+```{r}
+
+rv <- ade4::RV.rtest(combined$topics, combined$cytokines, nrepet = 1000)
+rv
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+ade4::RV.rtest(combined$topics, combined$cytokines, nrepet = 1000)
+ade4::RV.rtest(combined$topics_scaled, combined$cytokines_scaled, nrepet = 1000)
+ade4::RV.rtest(combined$topics, combined$cytokines_scaled, nrepet = 1000)
+ade4::RV.rtest(combined$topics_scaled, combined$cytokines, nrepet = 1000)
+```
+
+#### RV and adjusted RV
+
+Adjusted RV:
+https://en.wikipedia.org/wiki/RV_coefficient#Shortcoming_of_the_coefficient_and_adjusted_version
+
+```{r}
+
+# FactoMineR::coeffRV(combined$topics, combined$cytokines)
+
+compute_RV <- function(X, Y){
+  tr <- function(Z) {
+    sum(diag(Z))
+  }
+  X <- scale(X, scale = FALSE)
+  Y <- scale(Y, scale = FALSE)
+  Sxx <- t(X) %*% X
+  Syy <- t(Y) %*% Y
+  Sxy <- t(X) %*% Y
+  Syx <- t(Y) %*% X
+  COVV <- tr(Sxy %*% Syx)
+  rv <- COVV/(tr(Sxx %*% Sxx) * tr(Syy %*% Syy))^0.5
+  
+  Lx <- diag(eigen(Sxx)$values)
+  Ly <- diag(eigen(Syy)$values)
+  Pi <- diag(x = 1, nrow = ncol(X), ncol = ncol(Y))
+  adj_rv <- COVV / tr(Lx %*% Pi %*% Ly)
+  
+  list(rv = rv, adj_rv = adj_rv)
+}
+
+compute_RV(combined$topics, combined$cytokines)
+
+```
+
+#### By visits
+
+```{r}
+
+rv_by_visits <- 
+  map(
+    c(0:4,7), 
+    function(visit, combined){
+      combined_V <- combined |> filter(AVISITN == visit)
+      rv_V <- ade4::RV.rtest(combined_V$topics, combined_V$cytokines, nrepet = 10000)
+      tibble(
+        visit_nb = visit, 
+        visit = visit |> get_visit_labels(), 
+        RV = rv_V$obs, 
+        pval = rv_V$pvalue
+      )
+    },
+    combined = combined
+  ) |> bind_rows() 
+
+rv_by_visits <- 
+  rv_by_visits |> 
+  mutate(adj_pval = p.adjust(pval, method = "BH"))
+
+rv_by_visits |> gt()
+
+```
+
+```{r}
+#| fig-height: 4
+#| fig-width: 4
+#| cache: false
+
+
+g <- 
+rv_by_visits |> 
+  ggplot(aes(x = visit, y = RV, size = -log10(adj_pval), col = adj_pval < 0.05)) +
+  geom_hline(aes(yintercept = rv$obs), linetype = 2) +
+  geom_point() +
+  expand_limits(y = 0, size = 0) +
+  xlab("") +
+  guides(col = "none") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+g
+
+```
+
+
+
+```{r}
+#| cache: false
+
+ggsave(g, filename = str_c(fig_out_dir(), "S4C.pdf"), width = 4, height = 4, device = cairo_pdf)
+
+```
+
+
+
+
+### DISTATIS
+
+
+#### Considering each visit as a separate table
+
+First, we retrieve the data for each visit for participants who have data for all visits.
+
+```{r}
+
+get_assay_at_visit <- function(v, combined, assay){
+  tmp <- combined |> filter(AVISITN == v)
+  tmp |> 
+    select(all_of(assay)) |> 
+    unnest(assay) |> 
+    as.data.frame() |> 
+    set_rownames(tmp$USUBJID)
+}
+
+pipv <- c(0:4, 7)
+combined_by_visits <- 
+  c(
+    map(pipv, get_assay_at_visit, combined, "rel_ab") |> 
+      set_names(str_c("M", pipv)), 
+    map(pipv, get_assay_at_visit, combined, "cytokines") |>
+      set_names(str_c("C", pipv)) ,
+    map(pipv, get_assay_at_visit, combined, "topics") |> 
+      set_names(str_c("T", pipv))
+  )
+
+# lapply(combined_by_visits, dim) |> bind_rows()
+
+
+common_samples <- Reduce(intersect, lapply(combined_by_visits, rownames))
+combined_by_visits_complete_cases <- 
+  combined_by_visits |>  
+  map(~ .[common_samples, ] |> set_rownames(common_samples)) 
+
+# lapply(combined_by_visits_complete_cases, dim) |> bind_rows()
+
+```
+
+Then, we compute the distances at each visits for these participants.
+
+
+
+```{r}
+
+distances_by_visits <- 
+  map(
+    seq_along(combined_by_visits_complete_cases |> names() |> str_subset("M|C")),
+    function(x){
+      if (str_detect(names(combined_by_visits_complete_cases)[x], "M"))
+        vegan::vegdist(combined_by_visits_complete_cases[[x]], method = "bray") |> as.matrix()
+      else 
+        dist(combined_by_visits_complete_cases[[x]], method = "manhattan") |> as.matrix()
+    }
+  ) |> set_names(combined_by_visits_complete_cases |> names() |> str_subset("M|C"))
+
+# lapply(distances_by_visits, dim) |> bind_rows()
+```
+
+
+
+
+```{r}
+
+n_participants <- length(common_samples)
+
+dist_by_visits_cube <- 
+  array(
+    distances_by_visits |> unlist(), 
+    dim = c(n_participants, n_participants, length(distances_by_visits)),
+    dimnames = list(common_samples, common_samples, names(distances_by_visits))
+  )
+
+res <- distatis(dist_by_visits_cube, nfact = 6)
+
+```
+
+```{r}
+
+# res$res4Cmat$C |> round(2) # RV equivalent
+# compute_RV(distances$topic_distances, distances$cytokine_distances)
+
+```
+
+
+```{r}
+
+RV_long <- 
+  res$res4Cmat$C |> 
+  as.data.frame() |> 
+  rownames_to_column("X") |> 
+  pivot_longer(cols = -X, names_to = "Y", values_to = "RV") |> 
+  mutate(
+    X_modality = str_extract(X, "^[A-Z]"),
+    Y_modality = str_extract(Y, "^[A-Z]")
+  ) 
+
+```
+
+```{r}
+#| eval: false
+
+RV_long |> 
+  filter(X != Y) |> 
+  ggplot(aes(x = X, y = Y |> fct_rev(), fill = RV)) +
+  geom_tile() +
+  geom_hline(yintercept = 6.5, col = "white", linewidth = 1.5) +
+  geom_vline(xintercept = 6.5, col = "white", linewidth = 1.5) +
+  geom_text(aes(label = round(RV, 2), col = round(RV + 0.25)), size = 2, fontface = 2) +
+  # facet_grid(Y_modality ~ X_modality, scales = "free") +
+  coord_fixed() +
+  # scale_fill_gradient(low = "gray80", high = "purple") +
+  scale_fill_viridis_c(option = "A", direction = -1) +
+  scale_color_viridis_c(option = "A", direction = 1) + # , limits = c(0, 1)
+  guides(col = "none") +
+  xlab("") + ylab("")
+
+```
+
+```{r}
+#| fig-height: 6
+#| fig-width: 5.5
+
+RV_long |> 
+  mutate(
+    X_visit = X |> parse_number() |> get_visit_labels(),
+    Y_visit = Y |> parse_number() |> get_visit_labels(),
+    X_modality = ifelse(X_modality == "M", "Microbiota", "Cytokines"),
+    Y_modality = ifelse(Y_modality == "M", "Microbiota", "Cytokines")
+  ) |> 
+  filter(X != Y) |> 
+  ggplot(aes(x = X_visit, y = Y_visit |> fct_rev(), fill = RV)) +
+  geom_tile() +
+  geom_hline(yintercept = 6.5, col = "white", linewidth = 1.5) +
+  geom_vline(xintercept = 6.5, col = "white", linewidth = 1.5) +
+  geom_text(aes(label = round(RV, 2), col = round(RV + 0.25)), size = 3, fontface = 2) +
+  facet_grid(Y_modality ~ X_modality, scales = "free") +
+  scale_fill_viridis_c(option = "A", direction = -1) +
+  scale_color_viridis_c(option = "A", direction = 1) + # , limits = c(0, 1)
+  guides(col = "none") +
+  xlab("") + ylab("") +
+  theme(
+    strip.text.y = element_text(angle = -90, hjust = 0.5),
+    panel.spacing = unit(0.1, "lines"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+
+```{r}
+#| eval: false
+
+res$res4Cmat$G |> 
+  as.data.frame() |> 
+  rownames_to_column("k") |> 
+  mutate(
+    visit = k |> parse_number() |> get_visit_labels(),
+    modality = k |> substr(1,1) |> as.factor() |> fct_recode(
+      "Microbiota" = "M",
+      "Cytokines" = "C"
+    )
+  ) |> 
+  ggplot(aes(x = `dim 1`, y = `dim 2`)) +
+  geom_vline(xintercept = 0, col = "gray") +
+  geom_hline(yintercept = 0, col = "gray") +
+  geom_path(aes(group = visit), col = "gray50", alpha = 0.5) +
+  geom_path(aes(group = modality, color = modality), alpha = 0.5, linewidth = 1) +
+  geom_label(aes(label = k, color = modality), size = 2) +
+  coord_fixed()
+
+```
+
+
+
+```{r}
+
+RV_PCoA <- vegan::wcmdscale(1-res$res4Cmat$C, eig = TRUE)
+
+```
+
+```{r}
+#| fig-height: 2
+#| fig-width: 4
+
+tibble(eig = RV_PCoA$eig) |> 
+  mutate(k = row_number()) |>
+  ggplot(aes(x = k, y = eig)) +
+  geom_col()
+
+```
+
+
+```{r}
+
+RV_PCoA_points <- 
+  RV_PCoA$points |> 
+  as.data.frame() |> 
+  rownames_to_column("k") |> 
+  mutate(
+    visit = k |> parse_number() |> get_visit_labels(),
+    modality = k |> substr(1,1) |> as.factor() |> fct_recode(
+      "Microbiota" = "M",
+      "Cytokines" = "C"
+    )
+  ) 
+
+```
+```{r}
+#| eval: false
+
+RV_PCoA_points |> 
+  ggplot(aes(x = Dim1, y = Dim2)) +
+  geom_vline(xintercept = 0, col = "gray") +
+  geom_hline(yintercept = 0, col = "gray") +
+  geom_path(aes(group = visit), col = "gray50", alpha = 0.5) +
+  geom_path(aes(group = modality, color = modality), alpha = 0.5, linewidth = 1) +
+  geom_label(aes(label = k, color = modality), size = 2) +
+  coord_fixed()
+```
+
+
+
+```{r}
+
+RV_long_manual <- 
+  map(
+    seq_along(distances_by_visits),
+    function(x){
+      map(
+        c(x+1, x+6),
+        function(y){
+          if(y <= 12){
+            RV_res <- 
+              RV.randtest(
+                distances_by_visits[[x]] |> as.data.frame(),
+                distances_by_visits[[y]] |> as.data.frame(),
+                nrepet = 99
+              )
+            tibble(
+              X = names(distances_by_visits)[x], 
+              Y = names(distances_by_visits)[y],
+              RV = RV_res$obs, pval = RV_res$pvalue
+            )
+          } else {tibble()}
+        }
+      )
+    }
+  ) |>  bind_rows()
+
+```
+
+```{r}
+#| eval: false
+
+RV_long_manual |> 
+  left_join(RV_long |> dplyr::rename(RV_DiSTATIS = RV)) |> 
+  ggplot(aes(x = RV_DiSTATIS, y = RV)) +
+  geom_point()
+
+```
+
+
+```{r}
+#| fig-height: 5
+#| fig-width: 11
+
+RV_long_manual_aug <- 
+  RV_long_manual |> 
+  mutate(
+    qval = p.adjust(pval, method = "BH"),
+    signif_corr = ifelse(qval < 0.05, "Yes", "No") |>  factor() |> fct_rev()
+  ) |>
+  left_join(
+    RV_PCoA_points |> dplyr::rename(X = k) |> select(X, modality, Dim1, Dim2, Dim3, Dim4), by = "X"
+  ) |> 
+  left_join(
+    RV_PCoA_points |> dplyr::rename(Y = k) |> select(Y, modality, Dim1, Dim2, Dim3, Dim4), by = "Y"
+  ) |> 
+  mutate(
+    joint_type = ifelse(modality.x == modality.y, modality.x |> as.character(), "Same visit")
+  ) 
+
+
+g_PCoA_12 <- 
+  RV_PCoA_points |> 
+  ggplot(aes(x = Dim1, y = Dim2)) +
+  geom_vline(xintercept = 0, col = "gray") +
+  geom_hline(yintercept = 0, col = "gray") +
+  geom_segment(
+    data = RV_long_manual_aug |> filter(!((X == "M7") & (Y == "C0"))),
+    aes(x = Dim1.x, y = Dim2.x, xend = Dim1.y, yend = Dim2.y, 
+        col = joint_type, linetype = signif_corr)
+  ) +
+  geom_label(aes(label = visit, color = modality), size = 4) + #  size = Dim3
+  coord_fixed() +
+  scale_color_manual(
+    "", values = c("Microbiota" = "indianred1", "Cytokines" = "darkslateblue", "Same visit" = "gray60")
+  ) +
+  scale_linetype_discrete("Signif. correlation") +
+  xlab("PCoA Dim 1") + ylab("PCoA Dim 2")
+
+
+g_PCoA_34 <- 
+  RV_PCoA_points |> 
+  ggplot(aes(x = Dim3, y = Dim4)) +
+  geom_vline(xintercept = 0, col = "gray") +
+  geom_hline(yintercept = 0, col = "gray") +
+  geom_segment(
+    data = RV_long_manual_aug |> filter(!((X == "M7") & (Y == "C0"))),
+    aes(x = Dim3.x, y = Dim4.x, xend = Dim3.y, yend = Dim4.y, 
+        col = joint_type, linetype = signif_corr),
+  ) +
+  geom_label(aes(label = visit, color = modality), size = 4) +
+  coord_fixed() +
+  scale_color_manual(
+    "",
+    values = c("Microbiota" = "indianred1", "Cytokines" = "darkslateblue", 
+               "Same visit" = "gray60")
+  ) +
+  scale_linetype_discrete("Signif. correlation") +
+  xlab("PCoA Dim 3") + ylab("PCoA Dim 4")
+
+g_PCoA_13 <- 
+  RV_PCoA_points |> 
+  ggplot(aes(x = Dim1, y = Dim3)) +
+  geom_vline(xintercept = 0, col = "gray") +
+  geom_hline(yintercept = 0, col = "gray") +
+  geom_segment(
+    data = RV_long_manual_aug |> filter(!((X == "M7") & (Y == "C0"))),
+    aes(x = Dim1.x, y = Dim3.x, xend = Dim1.y, yend = Dim3.y, 
+        col = joint_type, linetype = signif_corr),
+  ) +
+  geom_label(aes(label = visit, color = modality), size = 4) +
+  coord_fixed() +
+  scale_color_manual(
+    "",
+    values = c("Microbiota" = "indianred1", "Cytokines" = "darkslateblue", 
+               "Same visit" = "gray60")
+  ) +
+  scale_linetype_discrete("Signif. correlation") +
+  xlab("PCoA Dim 1") + ylab("PCoA Dim 3")
+
+
+g_PCoA_12 + g_PCoA_34 +
+  plot_layout(guides = "collect") 
+
+
+g_PCoA_12 + g_PCoA_13 +
+  plot_layout(guides = "collect") 
+
+
+```
+
+```{r}
+
+library(plotly)
+
+RV_PCoA_points |> 
+  plot_ly(
+    type = "scatter3d", mode = "markers",
+    x = ~Dim1, y = ~Dim2, z = ~Dim3,
+    color = ~modality
+  ) |> 
+  add_text(
+    text = ~k
+  ) |> 
+  add_paths() |> 
+  add_lines(
+    color = ~visit 
+  )
+
+
+```
+
+
+
+
+
+```{r}
+#| eval: false
+
+res$res4Cmat$eigValues
+res$res4Cmat$eigValues/sum(res$res4Cmat$eigValues)
+(res$res4Cmat$eigValues/sum(res$res4Cmat$eigValues)) |> plot()
+
+
+```
+
+Screeplot of the compromise eigenvalues
+
+```{r}
+
+g <- 
+  tibble(eig = res$res4Splus$eigValues) |> 
+  mutate(n = row_number()) |> 
+  ggplot(aes(x = n, y = eig)) +
+  geom_col()
+
+g +
+g + scale_x_continuous(limits = c(0, 21))
+
+
+```
+
+```{r}
+
+compromise <- 
+  res$res4Splus$F |> 
+  as.data.frame() |> 
+  rownames_to_column("USUBJID") |>
+  as_tibble() |> 
+  left_join(combined |> select(USUBJID, ARM) |> distinct(), by = join_by(USUBJID))
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3
+
+compromise |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = ARM)) +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  scale_color_manual(values = get_arm_colors())
+
+
+compromise |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`, col = ARM)) +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  scale_color_manual(values = get_arm_colors())
+
+```
+
+Partial scores 
+
+```{r}
+
+partial <- 
+  map(
+    1:dim(res$res4Splus$PartialF)[3], 
+    ~ 
+      res$res4Splus$PartialF[,,.] |> 
+      as_tibble() |> 
+      mutate(
+        table = dimnames(res$res4Splus$PartialF)[[3]][.x],
+        USUBJID = rownames(res$res4Splus$PartialF[,,.x])
+      )
+  ) |> 
+  bind_rows() |> 
+  left_join(combined |> select(USUBJID, ARM) |> distinct(), by = join_by(USUBJID)) |> 
+  mutate(AVISITN = parse_number(table)) |> 
+  bind_rows(
+    compromise |> 
+      expand_grid(AVISITN = pipv) |> 
+      mutate(table = "compromise")
+  ) |> 
+  mutate(
+    table_type = 
+      case_when(
+        str_detect(table, "M") ~ "Microbiota",
+        str_detect(table, "C") ~ "Cytokines",
+        table == "compromise" ~ "Compromise"
+      ),
+    visit = get_visit_labels(AVISITN)
+  )
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 5
+
+partial |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table_type), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ visit) +
+  scale_color_manual("", values = c("steelblue1", "darkslateblue", "indianred1"))
+
+partial |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table_type), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  facet_grid(ARM ~ visit) +
+  scale_color_manual("", values = c("steelblue1", "darkslateblue", "indianred1"))
+
+```
+
+```{r}
+
+correlations_factors_variables <-
+  map(
+    seq_along(combined_by_visits_complete_cases),
+    function(x){
+      cor(combined_by_visits_complete_cases[[x]], 
+          compromise |> select(starts_with("Factor"))) |> 
+        as.data.frame() |> 
+        rownames_to_column("feature") |> 
+        as_tibble() |> 
+        mutate(table = names(combined_by_visits_complete_cases)[x])
+    }
+  ) |> 
+  bind_rows() 
+
+correlations_factors_variables <- 
+  correlations_factors_variables |> 
+  mutate(
+    table_type = 
+      case_when(
+        str_detect(table, "M") ~ "Microbiota",
+        str_detect(table, "T") ~ "Topics",
+        str_detect(table, "C") ~ "Cytokines",
+        TRUE ~ "Error"
+      ),
+    AVISITN = parse_number(table),
+    visit = get_visit_labels(AVISITN)
+  )
+
+```
+
+Correlation circles
+
+```{r}
+#| fig-width: 16
+#| fig-height: 6
+
+correlations_factors_variables |> 
+  filter(table_type != "Microbiota") |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = feature)) +
+  geom_circle(aes(x0 = 0, y0 = 0, r = 1), col = "gray80", linewidth = 0.25) +
+  geom_segment(
+    aes(xend = 0, yend = 0), 
+    arrow = 
+      arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
+  ) +
+  geom_text_repel(aes(label = feature), show.legend = FALSE) +
+  coord_fixed() +
+  facet_grid(table_type ~ visit) +
+  guides(col = "none")
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 8
+
+correlations_factors_variables |> 
+  filter(table_type != "Microbiota") |>
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = visit)) +
+  geom_circle(aes(x0 = 0, y0 = 0, r = 1), col = "gray80", linewidth = 0.25) +
+  geom_segment(
+    aes(xend = 0, yend = 0), 
+    arrow = 
+      arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
+  ) +
+  coord_fixed() +
+  facet_wrap(feature ~ ., nrow = 3) 
+
+```
+
+
+
+
+
+#### Overall (BC & L1) - Excluding post-MTZ visit
+
+```{r}
+
+distances <- 
+  combined |> 
+  filter(AVISITN != 1) |> 
+  mutate(
+    mb_distances = vegan::vegdist(rel_ab, method = "bray") |> as.matrix(),
+    cytokine_distances = dist(cytokines, method = "manhattan") |> as.matrix()
+  )
+
+dist_cube <- 
+  array(
+    c(
+      distances$mb_distances, 
+      distances$cytokine_distances
+    ), 
+    dim = c(nrow(distances), nrow(distances), 2)
+  )
+
+res <- distatis(dist_cube, nfact = 6)
+
+```
+
+```{r}
+
+res$res4Cmat$C # RV equivalent
+# compute_RV(distances$topic_distances, distances$cytokine_distances)
+
+```
+
+```{r}
+
+res$res4Cmat$eigValues
+res$res4Cmat$eigValues/sum(res$res4Cmat$eigValues)
+
+```
+
+```{r}
+
+g <- 
+  tibble(eig = res$res4Splus$eigValues) |> 
+  mutate(n = row_number()) |> 
+  ggplot(aes(x = n, y = eig)) +
+  geom_col()
+
+g + 
+  patchwork::inset_element(
+    g + scale_x_continuous(limits = c(0, 21)),
+    left = 0.2, bottom = 0.25, right = 1, top = 1, align_to = "plot", ignore_tag = TRUE
+  )
+
+```
+```{r}
+
+g_eig <- 
+  tibble(eig = res$res4Splus$eigValues) |> 
+  mutate(n = row_number()) |> 
+  filter(n <= 10) |> 
+  ggplot(aes(x = n |> factor(), y = eig)) +
+  geom_col(fill = "gray50") +
+  xlab("DiSTATIS comp.") + ylab("Eigenv.") +
+  theme(axis.text.y = element_blank())
+  
+# g_eig
+
+```
+
+
+
+```{r}
+
+compromise <- 
+  res$res4Splus$F |> 
+  as_tibble() |> 
+  bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV))
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3
+
+g_compromise_per_visit <- 
+  compromise |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = ARM)) +
+  geom_hline(yintercept = 0, color = "gray") +
+  geom_vline(xintercept = 0, color = "gray") +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(. ~ get_visit_labels(AVISITN)) +
+  scale_color_manual("Intervention Arm", values = get_arm_colors()) +
+  xlab("DiSTATIS Compromise Component 1") +
+  ylab("Component 2") + 
+  theme(legend.position = "top")
+
+
+g_compromise_per_visit
+
+compromise |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`, col = ARM)) +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  facet_grid(. ~ get_visit_labels(AVISITN)) +
+  scale_color_manual(values = get_arm_colors())
+
+```
+
+```{r}
+
+partial <- 
+  bind_rows(
+    res$res4Splus$PartialF[,,1] |> 
+      as_tibble() |> 
+      mutate(table = "Microbiota") |> 
+      bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV)),
+    res$res4Splus$PartialF[,,2] |>
+      as_tibble() |>
+      mutate(table = "Cytokines") |>
+      bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV)),
+    compromise |> 
+      mutate(table = "compromise")
+  )  
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 5
+
+partial |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual(values = c("steelblue1", "darkslateblue", "indianred1"))
+
+partial |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual(values = c("steelblue1", "darkslateblue", "indianred1"))
+
+```
+
+Focus on Visit 2 (week 4) data
+
+```{r}
+#| fig-height: 7
+#| fig-width: 5
+
+g_partial_V2 <- 
+  partial |> 
+  filter(AVISITN == 2) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual("", values = c("gray60", "darkslateblue", "indianred1")) +
+  xlab("DiSTATIS Compromise Component 1") +
+  ylab("Component 2") + 
+  theme(legend.position = "top")
+
+g_partial_V2
+
+partial |> 
+  filter(AVISITN == 2) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = USUBJID)) +
+  geom_line(aes(group = USUBJID), alpha = 0.5) +
+  geom_point(aes(shape = table)) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  guides(col = "none")
+
+```
+
+```{r}
+
+cor_topics <- 
+  cor(distances$topics, compromise |> select(starts_with("Factor"))) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cor_cytokines <- 
+  cor(distances$cytokines, compromise |> select(starts_with("Factor"))) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cors <- 
+  bind_rows(
+    cor_topics |> mutate(table = "Microbiota topics"),
+    cor_cytokines |> mutate(table = "cytokines")
+  )
+
+```
+
+Correlation circles
+
+```{r}
+#| fig-width: 10
+
+g_cor_circle_L1_12 <- 
+  cors |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = table)) +
+  geom_circle(aes(x0 = 0, y0 = 0, r = 1), col = "gray80", linewidth = 0.25) +
+  geom_segment(
+    aes(xend = 0, yend = 0), 
+    arrow = 
+      arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
+  ) +
+  geom_text_repel(
+    aes(label = feature), show.legend = FALSE, max.overlaps = Inf,
+    position = ggpp::position_nudge_center(0.1, 0.1, 0, 0),
+    segment.linetype = 1, segment.color = "gray70", min.segment.length = 0.8,
+    box.padding = 0.3
+    ) +
+  coord_fixed() +
+  scale_color_manual("", values = block_colors) +
+  scale_x_continuous("Corr. with DiSTATIS compromise comp. 1", breaks = -1:1) +
+  scale_y_continuous("Corr. with comp. 2", breaks = -1:1) 
+
+
+g_cor_circle_L1_34 <- 
+  cors |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`, col = table)) +
+  geom_circle(aes(x0 = 0, y0 = 0, r = 1), col = "gray80", linewidth = 0.25) +
+  geom_segment(
+    aes(xend = 0, yend = 0), 
+    arrow = 
+      arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
+  ) +
+  geom_text_repel(
+    aes(label = feature), show.legend = FALSE,
+    position = ggpp::position_nudge_center(0.1, 0.1, 0, 0),
+    segment.linetype = 1, segment.color = "gray70", min.segment.length = 0.8,
+    box.padding = 0.3, max.overlaps = 3
+    ) +
+  coord_fixed() +
+  scale_color_manual("", values = block_colors)  +
+  scale_x_continuous("Corr. with DiSTATIS compromise comp. 3", breaks = -1:1) +
+  scale_y_continuous("Corr. with comp. 4", breaks = -1:1) 
+
+
+g_cor_circle_L1_12 + g_cor_circle_L1_34 +
+
+  plot_layout(guides = "collect")
+
+```
+
+```{r}
+#| fig-height: 10
+#| fig-width: 4
+
+g_distatis <- 
+  g_cor_circle_L1_12 + 
+  patchwork::inset_element(
+    g_eig + 
+      theme(
+        plot.background = element_rect(fill = "white", color = "white"),
+        plot.margin = margin(t = 0, l = 2, r = 1, b = 10, unit = "pt"),
+        panel.grid.major.x = element_blank()
+      ), 
+    left = 0, bottom = 0.65, right = 0.4, top = 1, align_to = "plot", ignore_tag = TRUE
+  ) +
+  g_cor_circle_L1_34 +
+  plot_layout(guides = "collect", ncol = 1) 
+
+# g_distatis
+
+save(g_distatis, file = str_c(data_dir(), "05_figures_tables/fig_3b.Rdata"))
+save(g_eig, g_cor_circle_L1_12, g_cor_circle_L1_34, file = str_c(data_dir(), "05_figures_tables/fig_3b_panels.Rdata"))
+
+
+```
+
+#### Overall (BC & L1)
+
+
+```{r}
+
+distances <- 
+  combined |> 
+  mutate(
+    mb_distances = vegan::vegdist(rel_ab, method = "bray") |> as.matrix(),
+    cytokine_distances = dist(cytokines, method = "manhattan") |> as.matrix()
+  )
+
+dist_cube <- 
+  array(
+    c(
+      distances$mb_distances, 
+      distances$cytokine_distances
+    ), 
+    dim = c(nrow(distances), nrow(distances), 2)
+  )
+
+res <- distatis(dist_cube, nfact = 6)
+
+```
+
+
+```{r}
+
+res$res4Cmat$C # RV equivalent
+# compute_RV(distances$topic_distances, distances$cytokine_distances)
+
+```
+
+```{r}
+#| eval: false
+
+res$res4Cmat$eigValues
+res$res4Cmat$eigValues/sum(res$res4Cmat$eigValues)
+
+```
+
+```{r}
+
+g <- 
+  tibble(eig = res$res4Splus$eigValues) |> 
+  mutate(n = row_number()) |> 
+  ggplot(aes(x = n, y = eig)) +
+  geom_col()
+
+g + 
+  patchwork::inset_element(
+    g + scale_x_continuous(limits = c(0, 21)),
+    left = 0.2, bottom = 0.25, right = 1, top = 1, align_to = "plot", ignore_tag = TRUE
+  )
+
+```
+
+```{r}
+
+compromise <- 
+  res$res4Splus$F |> 
+  as_tibble() |> 
+  bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV))
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3
+
+g_compromise_per_visit <- 
+  compromise |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = ARM)) +
+  geom_hline(yintercept = 0, color = "gray") +
+  geom_vline(xintercept = 0, color = "gray") +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(. ~ get_visit_labels(AVISITN)) +
+  scale_color_manual("Intervention Arm", values = get_arm_colors()) +
+  xlab("DiSTATIS Compromise Component 1") +
+  ylab("Component 2") + 
+  theme(legend.position = "top")
+
+
+g_compromise_per_visit
+
+compromise |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`, col = ARM)) +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  facet_grid(. ~ get_visit_labels(AVISITN)) +
+  scale_color_manual(values = get_arm_colors())
+
+```
+
+```{r}
+
+partial <- 
+  bind_rows(
+    res$res4Splus$PartialF[,,1] |> 
+      as_tibble() |> 
+      mutate(table = "Microbiota") |> 
+      bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV)),
+    res$res4Splus$PartialF[,,2] |>
+      as_tibble() |>
+      mutate(table = "Cytokines") |>
+      bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV)),
+    compromise |> 
+      mutate(table = "compromise")
+  )  
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 5
+
+partial |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual(values = c("steelblue1", "darkslateblue", "indianred1"))
+
+partial |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual(values = c("steelblue1", "darkslateblue", "indianred1"))
+
+```
+
+Focus on Visit 2 (week 4) data
+
+```{r}
+#| fig-height: 7
+#| fig-width: 5
+
+g_partial_V2 <- 
+  partial |> 
+  filter(AVISITN == 2) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual("", values = c("gray60", "darkslateblue", "indianred1")) +
+  xlab("DiSTATIS Compromise Component 1") +
+  ylab("Component 2") + 
+  theme(legend.position = "top")
+
+g_partial_V2
+
+partial |> 
+  filter(AVISITN == 2) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = USUBJID)) +
+  geom_line(aes(group = USUBJID), alpha = 0.5) +
+  geom_point(aes(shape = table)) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  guides(col = "none")
+
+```
+
+```{r}
+
+cor_topics <- 
+  cor(distances$topics, compromise |> select(starts_with("Factor"))) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cor_cytokines <- 
+  cor(distances$cytokines, compromise |> select(starts_with("Factor"))) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cors <- 
+  bind_rows(
+    cor_topics |> mutate(table = "Microbiota\nsub-communities"),
+    cor_cytokines |> mutate(table = "cytokines")
+  )
+
+```
+
+Correlation circles
+
+```{r}
+#| fig-width: 8
+
+plot_distatis_corr_circle <- function(cors, axes = 1:2){
+  
+  cors$x <- cors[, str_c("Factor ", axes[1])] |> unlist()
+  cors$y <- cors[, str_c("Factor ", axes[2])] |> unlist()
+  
+  cors |> 
+  ggplot(aes(x = x, y = y, col = table)) +
+  geom_circle(aes(x0 = 0, y0 = 0, r = 1), col = "gray80", linewidth = 0.25) +
+  geom_segment(
+    aes(xend = 0, yend = 0), 
+    arrow = 
+      arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
+  ) +
+  geom_text_repel(
+    aes(label = feature), show.legend = FALSE,
+    position = ggpp::position_nudge_center(0.1, 0.1, 0, 0),
+    segment.linetype = 1, segment.color = "gray70", min.segment.length = 0.8
+    ) +
+  coord_fixed() +
+  scale_color_manual("", values = block_colors) +
+  xlab(str_c("DiSTATIS compromise comp. ", axes[1])) +
+  ylab(str_c("comp. ", axes[2]))
+}
+
+g_cor_circle_L1_12 <- plot_distatis_corr_circle(cors, axes = 1:2)
+g_cor_circle_L1_34 <- plot_distatis_corr_circle(cors, axes = 3:4)
+g_cor_circle_L1_56 <- plot_distatis_corr_circle(cors, axes = 5:6)
+
+
+g_cor_circle_L1_12 + g_cor_circle_L1_34 + # g_cor_circle_L1_56 +
+  plot_layout(guides = "collect")
+
+```
+
+
+
+
+
+
+
+
+#### Overall (BC & L2) - Excluding post-MTZ visit
+
+```{r}
+
+distances <- 
+  combined |> 
+  filter(AVISITN != 1) |> 
+  mutate(
+    mb_distances = vegan::vegdist(rel_ab, method = "bray") |> as.matrix(),
+    cytokine_distances = dist(cytokines, method = "euclidean") |> as.matrix()
+  )
+
+dist_cube <- 
+  array(
+    c(
+      distances$mb_distances, 
+      distances$cytokine_distances
+    ), 
+    dim = c(nrow(distances), nrow(distances), 2)
+  )
+
+res <- distatis(dist_cube, nfact = 6)
+
+
+```
+
+```{r}
+
+res$res4Cmat$C # RV equivalent
+# compute_RV(distances$topic_distances, distances$cytokine_distances)
+
+```
+
+```{r}
+
+res$res4Cmat$eigValues
+res$res4Cmat$eigValues/sum(res$res4Cmat$eigValues)
+
+```
+
+```{r}
+
+g <- 
+  tibble(eig = res$res4Splus$eigValues) |> 
+  mutate(n = row_number()) |> 
+  ggplot(aes(x = n, y = eig)) +
+  geom_col()
+
+g
+g + scale_x_continuous(limits = c(0, 21))
+
+
+```
+
+```{r}
+
+compromise <- 
+  res$res4Splus$F |> 
+  as_tibble() |> 
+  bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV))
+
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3
+
+compromise |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = ARM)) +
+  geom_hline(yintercept = 0, color = "gray") +
+  geom_vline(xintercept = 0, color = "gray") +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(. ~ get_visit_labels(AVISITN)) +
+  scale_color_manual("Intervention Arm", values = get_arm_colors()) +
+  xlab("DiSTATIS Compromise Component 1") +
+  ylab("Component 2") + 
+  theme(legend.position = "top")
+
+
+compromise |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`, col = ARM)) +
+  geom_point(size = 0.5) +
+  stat_ellipse() +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  facet_grid(. ~ get_visit_labels(AVISITN)) +
+  scale_color_manual("Intervention arm", values = get_arm_colors())
+
+```
+
+```{r}
+
+partial <- 
+  bind_rows(
+    res$res4Splus$PartialF[,,1] |> 
+      as_tibble() |> 
+      mutate(table = "Microbiota") |> 
+      bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV)),
+    res$res4Splus$PartialF[,,2] |>
+      as_tibble() |>
+      mutate(table = "Cytokines") |>
+      bind_cols(distances |> select(USUBJID, AVISITN, ARM, PIPV)),
+    compromise |> 
+      mutate(table = "Compromise")
+  )  
+
+```
+
+```{r}
+#| fig-width: 15
+#| fig-height: 5
+
+partial |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual("", values = c("steelblue1", "darkslateblue", "indianred1"))
+
+partial |> 
+  filter(PIPV) |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[4]/res$res4Splus$eigValues[3]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual("", values = c("steelblue1", "darkslateblue", "indianred1"))
+
+```
+
+Focus on Visit 2 (week 4) data
+
+```{r}
+#| fig-height: 7
+#| fig-width: 5
+
+partial |> 
+  filter(AVISITN == 2) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`)) +
+  geom_hline(yintercept = 0, col = "gray80") +
+  geom_vline(xintercept = 0, col = "gray80") +
+  geom_line(aes(group = USUBJID), col = "gray", alpha = 0.5) +
+  geom_point(aes(col = table), size = 0.5) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  scale_color_manual("", values = c("gray60", "darkslateblue", "indianred1")) +
+  xlab("DiSTATIS Compromise Component 1") +
+  ylab("Component 2") + 
+  theme(legend.position = "top")
+
+partial |> 
+  filter(AVISITN == 2) |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = USUBJID)) +
+  geom_line(aes(group = USUBJID), alpha = 0.5) +
+  geom_point(aes(shape = table)) +
+  coord_fixed(ratio = res$res4Splus$eigValues[2]/res$res4Splus$eigValues[1]) +
+  facet_grid(ARM ~ AVISITN |> get_visit_labels()) +
+  guides(col = "none")
+
+```
+
+```{r}
+
+cor_topics <- 
+  cor(distances$topics, compromise |> select(starts_with("Factor"))) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cor_cytokines <- 
+  cor(distances$cytokines, compromise |> select(starts_with("Factor"))) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cors <- 
+  bind_rows(
+    cor_topics |> mutate(table = "Microbiota\nsub-communities"),
+    cor_cytokines |> mutate(table = "cytokines")
+  )
+
+```
+
+Correlation circles
+
+```{r}
+#| fig-width: 10
+
+cors |> 
+  ggplot(aes(x = `Factor 1`, y = `Factor 2`, col = table)) +
+  geom_circle(aes(x0 = 0, y0 = 0, r = 1), col = "gray80", linewidth = 0.25) +
+  geom_segment(
+    aes(xend = 0, yend = 0), 
+    arrow = 
+      arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
+  ) +
+  geom_text_repel(aes(label = feature), show.legend = FALSE) +
+  coord_fixed() +
+  scale_color_manual(values = block_colors) +
+  
+  cors |> 
+  ggplot(aes(x = `Factor 3`, y = `Factor 4`, col = table)) +
+  geom_circle(aes(x0 = 0, y0 = 0, r = 1), col = "gray80", linewidth = 0.25) +
+  geom_segment(
+    aes(xend = 0, yend = 0), 
+    arrow = 
+      arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
+  ) +
+  geom_text_repel(aes(label = feature), show.legend = FALSE) +
+  coord_fixed() +
+  scale_color_manual(values = block_colors)
+
+```
+
+
+#### Differentiating CTV-05 from other *L. crispatus* strains
+
+
+```{r}
+
+
+
+ctv05_rel_ab <- 
+  get_assay_wide_format(mae, "tax_CTV05_p") |>
+  dplyr::rename(rel_ab = assay)
+
+combined_ctv05 <- 
+  inner_join(ctv05_rel_ab, cytokines, by = join_by(Barcode))
+
+
+ctv05_topics <- 
+  get_assay_wide_format(mae, "c_topics_16S_10_ctv05", add_colData = FALSE) |>
+  dplyr::rename(topics = assay) |> 
+  mutate(
+    topics = topics |> set_colnames(SummarizedExperiment::rowData(mae[["c_topics_16S_10_ctv05"]])$topic_label)
+  )
+
+combined_ctv05 <- 
+  inner_join(combined_ctv05, ctv05_topics, by = join_by(Barcode))
+
+combined_ctv05 <- 
+  combined_ctv05 |> 
+  select(
+    USUBJID, AVISITN, ARM, rel_ab, topics, cytokines, everything()
+  )
+
+```
+
+```{r}
+
+distances_ctv05 <- 
+  combined_ctv05 |> 
+  filter(AVISITN != 1) |>
+  mutate(
+    mb_distances = vegan::vegdist(rel_ab, method = "bray") |> as.matrix(),
+    cytokine_distances = dist(cytokines, method = "manhattan") |> as.matrix()
+  )
+
+dist_cube_ctv05 <- 
+  array(
+    c(
+      distances_ctv05$mb_distances, 
+      distances_ctv05$cytokine_distances
+    ), 
+    dim = c(nrow(distances_ctv05), nrow(distances_ctv05), 2)
+  )
+
+res_ctv05 <- distatis(dist_cube_ctv05, nfact = 6)
+
+
+```
+
+```{r}
+
+res_ctv05$res4Cmat$C # RV equivalent
+# compute_RV(distances$topic_distances, distances$cytokine_distances)
+
+```
+
+```{r}
+#| eval: false
+
+res_ctv05$res4Cmat$eigValues
+res_ctv05$res4Cmat$eigValues/sum(res_ctv05$res4Cmat$eigValues)
+
+```
+
+```{r}
+
+g <- 
+  tibble(eig = res_ctv05$res4Splus$eigValues) |> 
+  mutate(n = row_number()) |> 
+  ggplot(aes(x = n, y = eig)) +
+  geom_col()
+
+g +
+g + scale_x_continuous(limits = c(0, 21))
+
+
+```
+
+```{r}
+
+compromise_cvt05 <- 
+  res_ctv05$res4Splus$F |> 
+  as_tibble() |> 
+  bind_cols(distances_ctv05 |> select(USUBJID, AVISITN, ARM, PIPV))
+
+```
+
+
+```{r}
+
+cor_topics <- 
+  cor(
+    distances_ctv05$topics, 
+    compromise_cvt05 |> select(starts_with("Factor"))
+  ) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cor_cytokines <- 
+  cor(
+    distances_ctv05$cytokines, 
+    compromise_cvt05 |> select(starts_with("Factor"))
+  ) |> 
+  as.data.frame() |> 
+  rownames_to_column("feature") |> 
+  as_tibble() 
+
+cors <- 
+  bind_rows(
+    cor_topics |> mutate(table = "Microbiota topics"),
+    cor_cytokines |> mutate(table = "cytokines")
+  )
+
+```
+
+Correlation circles
+
+```{r}
+#| fig-width: 15
+
+plot_distatis_corr_circle(cors, axes = 1:2) +
+  
+plot_distatis_corr_circle(cors, axes = 3:4)
+
+```
+
+```{r}
+#| fig-width: 16
+#| fig-height: 7
+#| fig-dpi: 300
+
+
+set.seed(123)
+g <- 
+tibble(eig = res_ctv05$res4Splus$eigValues) |> 
+  mutate(n = row_number()) |> 
+  ggplot(aes(x = n, y = eig)) +
+  geom_col() + 
+  scale_x_continuous(limits = c(0, 11)) +
+
+plot_distatis_corr_circle(cors, axes = 1:2) +
+  
+plot_distatis_corr_circle(cors, axes = 3:4) +
+  plot_layout(nrow = 1, widths = c(1, 4, 4), guides = "collect") +
+  plot_annotation(tag_levels = list(LETTERS[5:(5+2)]))
+
+g
+
+
+```
+
+
+
+```{r}
+
+ggsave(g, filename = str_c(fig_out_dir(), "S4EG.pdf"), width = 14, height = 5, device = cairo_pdf)
+
+```
+
+
+
+
+
+
+

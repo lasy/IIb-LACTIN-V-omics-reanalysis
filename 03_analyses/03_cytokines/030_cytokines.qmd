@@ -1,0 +1,244 @@
+---
+title: "Effects of intervention on vaginal inflammation (cytokines/chemokines)"
+author: Laura Symul
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    number-sections: true
+execute:
+  cache: true
+  warning: false
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+# Cytokines
+
+```{r child = '031_cytokine_trajectories.qmd'}
+```
+
+# Integration with microbiota
+
+```{r child = '032_integration.qmd'}
+```
+
+
+
+# Cytokine figure
+
+## Version 1
+
+```{r}
+load(file = str_c(data_dir(), "05_figures_tables/fig_3a_PC1_subtracted_all.Rdata"), verbose = TRUE)
+load(file = str_c(data_dir(), "05_figures_tables/fig_3b.Rdata"), verbose = TRUE)
+
+```
+
+```{r}
+#| fig-width: 13
+#| fig-height: 11
+#| fig-dpi: 300
+
+set.seed(5)
+g_selection + xlab("") + g_distatis +
+  plot_layout(nrow = 1,  widths = c(1, 1.4)) +
+  plot_annotation(tag_levels = "A")
+
+```
+
+
+
+## Version 2
+
+### Part 1: PC1-subtracted z-log10(conc.) of cytokines
+
+```{r}
+assay_name <- "cytokine_log10_SE_corrected_incl_cytokine"
+value_label <- "PC1-subtracted z-log10(conc.)"
+value_label <- "adj. log10(conc.)"
+selected_cytokines <- c("IL-1b", "IP-10", "IL-6")
+```
+
+```{r}
+
+cytokines_long <- 
+  get_assay_long_format(
+    mae, assay_name, 
+    feature_name = "cytokine", values_name = "value"
+  ) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) 
+
+```
+
+```{r}
+
+cat("N cytokines: ", length(unique(cytokines_long$cytokine)), "\n")
+cat("N samples: ", length(unique(cytokines_long$Barcode)), "\n")
+
+```
+
+```{r}
+
+categories_levels <- 
+  c("≥ 50% L. crispatus", "≥ 50% Lactobacillus, < 50% L. crispatus", "< 50% Lactobacillus")
+microbiota_categories <- 
+  get_assay_long_format(
+    mae, "mb_categories", add_colData = FALSE, values_name = "microbiota"
+  ) |> 
+  select(-feature) |> 
+  mutate(microbiota = microbiota |> factor(levels = categories_levels))
+
+cytokines_long <- 
+  cytokines_long |> 
+  select(-any_of(c("microbiota"))) |> 
+  left_join(microbiota_categories, by = join_by(Barcode))
+
+```
+
+```{r}
+
+preMTZ_cytokines <- 
+  cytokines_long |>
+  dplyr::filter(AVISITN == 0) |>
+  select(USUBJID, cytokine, value) |> 
+  dplyr::rename(pre_MTZ_value = value)
+
+cytokines_to_preMTZ <- 
+  cytokines_long |> 
+  filter(PIPV, AVISITN != 0) |> 
+  mutate(Visit = get_visit_labels(AVISITN)) |>
+  select(Barcode, USUBJID, Visit, ARM, cytokine, value, microbiota) |> 
+  left_join(preMTZ_cytokines, by = join_by(USUBJID, cytokine)) |> 
+  filter(!is.na(pre_MTZ_value)) |> 
+  mutate(diff = value - pre_MTZ_value)
+
+```
+
+```{r}
+#| fig-height: 4
+#| fig-width: 13
+
+part_1_plots <- 
+  map(
+    selected_cytokines,
+    ~ cytokines_to_preMTZ |> 
+      filter(cytokine == .x) |> 
+      filter(!(Visit %in% c("Week 4", "Week 8"))) |> 
+      plot_cytokine_to_preMTZ(value_label = value_label) +
+      xlab("")
+  )
+
+part_1_plots |> 
+  wrap_plots(ncol = 3, guides = "collect") +
+  plot_annotation(tag_levels = "A")
+
+```
+
+### Part 2: integration with microbiota
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+
+g_distatis[[1]] + 
+  patchwork::inset_element(
+    g_distatis[[2]]  + 
+      theme(
+        plot.background = element_rect(fill = "white", color = "white"),
+        plot.margin = margin(t = 0, l = 2, r = 1, b = 10, unit = "pt"),
+        panel.grid.major.x = element_blank()
+      ), 
+    left = 0, bottom = 0.7, right = 0.35, top = 1, align_to = "plot", ignore_tag = TRUE
+  ) +
+  g_distatis[[3]]  +
+  plot_layout(guides = "collect", ncol = 2) 
+
+
+```
+```{r}
+
+load(file = str_c(data_dir(), "05_figures_tables/fig_3b_panels.Rdata"), verbose = TRUE)
+
+```
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 5
+
+g_eig + 
+ g_cor_circle_L1_12 +
+  g_cor_circle_L1_34 +
+  plot_layout(guides = "collect", ncol = 3, widths = c(1, 4, 4)) +
+  plot_annotation(tag_levels = "A") 
+
+```
+
+
+### Assembled
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 9
+#| fig-dpi: 300
+
+set.seed(5)
+
+
+patch_1 <- 
+  (
+    part_1_plots[[1]] + part_1_plots[[2]] + part_1_plots[[3]] + 
+      plot_layout(guides = "collect", nrow = 1) &
+      theme(
+        legend.margin = margin(t = -20)
+      )
+  ) 
+patch_2 <-  
+  (
+    g_eig + 
+      (g_cor_circle_L1_12 + g_cor_circle_L1_34 + plot_layout(guides = "collect")) +
+      plot_layout(ncol = 2, widths = c(1, 8))
+  )
+
+fig_4 <- 
+(patch_1 / patch_2) +
+  plot_layout(nrow = 2, heights = c(1, 1.3)) +
+  plot_annotation(tag_levels = "A")
+
+fig_4
+
+```
+
+
+
+```{r}
+#| cache: false
+
+ggsave(fig_4, filename = str_c(fig_out_dir(), "Fig4.pdf"), width = 13, height = 9, device = cairo_pdf)
+
+```
+
+
+
+
+# Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>
+
+
+

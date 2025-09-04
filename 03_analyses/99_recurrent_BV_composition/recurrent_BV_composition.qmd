@@ -1,0 +1,268 @@
+---
+title: "Do participant with recurrent BV have a composition similar to their incident BV composition?"
+author: Laura Symul
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: left
+    theme: journal
+    embed-resources: true
+execute:
+  cache: true
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 80
+---
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(vegan)
+library(ggrepel)
+library(igraph)
+library(ggnetwork)
+library(ggnewscale)
+library(phyloseqGraphTest)
+
+theme_set(theme_light())
+
+```
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+tmp <- fs::dir_map("R", source)
+tmp <- fs::dir_map("../../R/", source)
+
+```
+
+
+```{bash}
+#| eval: false
+#| echo: false
+
+# We first mount the Gates LACTIN-V dropbox folder locally:
+mkdir -p lactinv_dropbox
+rclone mount lactinv-dropbox:"/Gates LACTIN-V/" "lactinv_dropbox/"
+```
+
+
+```{r}
+#| warning: false
+
+# We load the MAE object and retrieve the clinical data
+mae <- load_latest_mae(str_c(data_dir(), "03_augmented_mae/"))
+clin <- MultiAssayExperiment::colData(mae) %>% as.data.frame()
+
+```
+
+
+```{r}
+
+target_visits <- c(4, 7)
+
+```
+
+
+# Methods
+
+To assess whether participants with recurrent BV (or lack of *Lactobacillus*-dominance) have a microbiota composition similar to their initial BV composition, we primarily rely on the Bray-Curtis dissimilarity between the pre-MTZ microbiota composition expressed as ASV relative abundances (the lowest possible resolution given 16S data) and the corresponding composition at the target visit (the week 24 visit as primary target visit and the week 12 visit for a sensitivity analysis).
+
+Participants were included in this analysis if they were diagnosed with BV or who had less than 50% *Lactobacillus* at the target visit and microbiota composition data was availble at the pre-MTZ visit. Analyses will distinguish between participants with or without BV at the target visit to assess whether conclusions differ based on BV diagnosis, using the same criteria for BV diagnosis as in Cohen et al, 2020.
+
+
+Because some participants with diverse microbiota may have a composition similar to other participants with diverse microbiota, we will not only evaluate the similarity to their own microbiota, but also compare it to the similarity with the microbiota of other participants to compute a percentile rank. Someone with a small percentile rank is more similar to themselves than to everyone else pre-MTZ. Some participants could be relatively similar to themselves but be more similar to other participants if several participants were enrolled with similarly diverse microbiota. 
+
+From the dissimilarity matrix $D$ where $d_{ij}$ is the dissimilarity between participants $i$ pre-MTZ and participant $j$ at the target visit, we can also construct the minimum spanning tree (MST) to visualize the relationships between participants and count the number of "pure edges" (*i.e.,* edges connecting the two visits (pre-MTZ and target visits) of the same participant). We can then test whether the observed number of pure edges is significantly higher than expected by chance using a graph permutation test. 
+
+We will evaluate whether these different metrics differ by arm to understand if the LBP (Lactin-V) disrupts the microbiota of "non-respondent" participants more than the Placebo does.
+
+The analyses are grouped in a function `recurrent_BV_composition_analysis()` that takes the `MAE` object and the target visit as input and returns a list of results, including the dissimilarity to self and others, the MST, and the graph permutation test results. 
+
+```{r}
+#| collapse: true
+recurrent_BV_composition_analysis
+```
+
+
+The function `make_figures_recurrent_BV_composition()` generates figures to visualize the results.
+
+```{r}
+#| collapse: true
+make_figures_recurrent_BV_composition
+```
+
+
+# Results
+
+## Analysis based on week 24 BV and composition
+
+
+```{r}
+
+res_week_24 <- recurrent_BV_composition_analysis(mae, target_visit = 7)
+figs_week_24 <- make_figures_recurrent_BV_composition(res_week_24)
+
+```
+
+```{r}
+
+res_week_24$outcome_table
+
+```
+
+
+Roughly half of participants who had <50% *Lactobacillus* at the week 24 visit were diagnosed with BV at that visit. All participants who were diagnosed with BV at the week 24 visit had <50% *Lactobacillus* at that visit.
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 5
+#| fig-cap: "(A) Minimum Spanning Tree (MST) built on the BC-dissimilarity matrix between microbiota composition as expressed in terms of ASV relative abundances at the pre-MTZ visit and the week 24 visit. Edges in black connect samples from the same participant, defining 'pure edges'. (B): Distribution of the number of 'pure' edges (connecting samples from the same participant) under 1000 graph permutations. The red line indicates the observed number of such edges."
+
+
+figs_week_24$MST + plot_permutations(res_week_24$gt) + 
+  plot_annotation(
+    tag_levels = "A"
+    ) & 
+  theme(plot.tag = element_text(size = 16, face = "bold")) 
+```
+
+
+```{r}
+#| warning: false
+#| fig-width: 13
+#| fig-height: 9
+#| fig-cap: '(A) Bray-Curtis dissimilarity (x-axis) between the week 24 and the pre-MTZ microbiota composition (expressed as ASV relative abundances) for each participant (y-axis) differentiating between dissimilarity with self (large red dots) and with others (small gray dots). Participants who received a BV diagnosis at week 24 are shown with a closed red dot, while those without BV at week 24 by an open red dot. Participants are ordered by increasing dissimilarity to self. (B) Percentile rank (x-axis) of the dissimilarity to self among dissimilarities with self and others for each participant (y-axis), colored by the arm they were randomized to. As in (A), participants who received a BV diagnosis at week 24 are shown with a closed dot, and those without by an open dot. Participants are ordered as in A. (C) Examples of microbiota compositions pre-MTZ and at week 24 for a selection of participants denoted with letters ranging from A to E and identified by these letters in panels (A-B). Participant A returns to a microbiota composition highly similar to their pre-MTZ composition. Participants B and C are more similar to themselves than to others, but are much less similar to themselves than participant A, especially participant C. Participants D and E are highly dissimilar to themselves pre-MTZ, but for participant D, that appears to be explained by a particularly uncommon microbiota pre-MTZ, while E has a particularly uncommon microbiota at week 24. (D) Distribution of Bray-Curtis dissimilarities to self by arm (horizontal panels) and by BV diagnosis at week 24 (colors). (E) Distribution of percentile ranks by arm (horizontal panels) and by BV diagnosis at week 24 (colors).'
+
+figs_week_24$main_figure
+```
+
+```{r}
+
+make_summary_stat_table(res = res_week_24)
+make_summary_stat_table_v2(res = res_week_24)
+
+```
+
+
+
+
+```{r}
+#| warning: false
+#| fig-width: 10
+#| fig-height: 8
+#| fig-cap: "Additional visualizations depicting the distributions of Bray-Curtis dissimilarities to self (top) and their associated percentile ranks (bottom)."
+
+figs_week_24$BC_distributions$patch + plot_annotation(tag_levels = "A")
+figs_week_24$PR_distributions$patch + plot_annotation(tag_levels = "A")
+
+```
+
+
+```{r}
+#| warning: false
+#| fig-width: 13
+#| fig-height: 6
+#| fig-cap: "(A-D) Bray-Curtis dissimilarity to self (y-axis) by (A) post-MTZ total *Lactobacillus* relative abundance; (B) difference in total *Lactobacillus* relative abundance between the post-MTZ and pre-MTZ visits; (C) maximum total *Lactobacillus* relative abundance post-MTZ and until the target visit; (D) Bray-Curtis dissimilarity between pre-MTZ and post-MTZ visits. (E-H) same as (A-D) but for the percentile ranks."
+
+
+figs_week_24$BC_and_PR_by_history + plot_annotation(tag_levels = "A")
+
+
+```
+
+
+
+
+## Analysis based on week 12 BV and composition
+
+
+
+```{r}
+
+res_week_12 <- recurrent_BV_composition_analysis(mae, target_visit = 4)
+figs_week_12 <- make_figures_recurrent_BV_composition(res_week_12)
+
+```
+
+```{r}
+
+res_week_12$outcome_table
+
+```
+
+
+Roughly half of participants who had <50% *Lactobacillus* at the week 12 visit were diagnosed with BV at that visit. 2 participants who were diagnosed with BV at the week 12 visit had ≥50% *Lactobacillus* at that visit.
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 5
+#| fig-cap: "(A) Minimum Spanning Tree (MST) built on the BC-dissimilarity matrix between microbiota composition as expressed in terms of ASV relative abundances at the pre-MTZ visit and the week 12 visit. Edges in black connect samples from the same participant, defining 'pure edges'. (B): Distribution of the number of 'pure' edges (connecting samples from the same participant) under 1000 graph permutations. The red line indicates the observed number of such edges."
+figs_week_12$MST + plot_permutations(res_week_12$gt)
+```
+
+
+```{r}
+#| warning: false
+#| fig-width: 13
+#| fig-height: 9
+#| fig-cap: '(A) Bray-Curtis dissimilarity (x-axis) between the week 12 and the pre-MTZ microbiota composition (expressed as ASV relative abundances) for each participant (y-axis) differentiating between dissimilarity with self (large red dots) and with others (small gray dots). Participants who received a BV diagnosis at week 12 are shown with a closed red dot, while those without BV at week 12 by an open red dot. Participants are ordered by increasing dissimilarity to self. (B) Percentile rank (x-axis) of the dissimilarity to self among dissimilarities with self and others for each participant (y-axis), colored by the arm they were randomized to. As in (A), participants who received a BV diagnosis at week 12 are shown with a closed dot, and those without by an open dot. Participants are ordered as in A. (C) Examples of microbiota compositions pre-MTZ and at week 12 for a selection of participants denoted with letters ranging from A to E and identified by these letters in panels (A-B). Participant A returns to a microbiota composition highly similar to their pre-MTZ composition. Participants B and C are more similar to themselves than to others, but are much less similar to themselves than participant A, especially participant C. Participants D and E are highly dissimilar to themselves pre-MTZ, but for participant D, that appears to be explained by a particularly uncommon microbiota pre-MTZ, while E has a particularly uncommon microbiota at week 12. (D) Distribution of Bray-Curtis dissimilarities to self by arm (horizontal panels) and by BV diagnosis at week 12 (colors). (E) Distribution of percentile ranks by arm (horizontal panels) and by BV diagnosis at week 12 (colors).'
+
+figs_week_12$main_figure
+```
+
+```{r}
+
+make_summary_stat_table(res = res_week_12)
+make_summary_stat_table_v2(res = res_week_12)
+
+```
+
+
+
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+
+figs_week_12$BC_distributions$patch
+figs_week_12$PR_distributions$patch
+
+```
+
+
+```{r}
+#| warning: false
+#| fig-width: 13
+#| fig-height: 6
+#| fig-cap: "(A-D) Bray-Curtis dissimilarity to self (y-axis) by (A) post-MTZ total *Lactobacillus* relative abundance; (B) difference in total *Lactobacillus* relative abundance between the post-MTZ and pre-MTZ visits; (C) maximum total *Lactobacillus* relative abundance post-MTZ and until the target visit; (D) Bray-Curtis dissimilarity between pre-MTZ and post-MTZ visits. (E-H) same as (A-D) but for the percentile ranks."
+
+figs_week_12$BC_and_PR_by_history
+
+
+```
+
+
+
+
+
+
+# Conclusions
+
+78% of participants who did not colonized with *Lactobacillus* end up with a microbiota more similar to their initial BV microbiota than to the microbiota of other participants, suggesting that the antibiotics and study products failed to significantly disrupt their microbiota. That fraction is higher in the Placebo arm (89%) than in the Lactin-V arm (70%) although confidence intervals overlap: 72% - 96% (Placebo) *vs* 54% - 82% (Lactin-V), and there was no evidence that participants who experienced a larger MTZ-induced shifts in their microbiota composition would be less likely to return to their initial BV microbiota.
+
+
+

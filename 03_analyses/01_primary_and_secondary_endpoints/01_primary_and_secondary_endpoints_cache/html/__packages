@@ -25,3 +25,4 @@ SummarizedExperiment
 MultiAssayExperiment
 phyloseq
 ggthemes
+ggtext

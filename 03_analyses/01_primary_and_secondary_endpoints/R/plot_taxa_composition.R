@@ -40,10 +40,10 @@ plot_taxa_composition <-
         tot_Lacto_prop = sum(prop[str_detect(taxon_group, "Lactobacillus")]),
         endpoint = 
           case_when(
-            L_crisp_prop >= 0.5 ~ "≥ 50% L. crisp.",
-            tot_Lacto_prop >= 0.5 ~ "≥ 50% Lacto.",
-            TRUE ~ "< 50% Lacto."
-          ) |> factor(levels = c("≥ 50% L. crisp.", "≥ 50% Lacto.",  "< 50% Lacto."))
+            L_crisp_prop >= 0.5 ~ "≥ 50% *L. crisp.*",
+            tot_Lacto_prop >= 0.5 ~ "≥ 50% *Lacto.*",
+            TRUE ~ "< 50% *Lacto.*"
+          ) |> factor(levels = c("≥ 50% *L. crisp.*", "≥ 50% *Lacto.*",  "< 50% *Lacto.*"))
       ) |> 
       ungroup() |> 
       arrange(-L_crisp_prop, -tot_Lacto_prop) |> 
@@ -82,13 +82,16 @@ plot_taxa_composition <-
       mutate(
         taxon_group = 
           taxon_group |> 
-          str_replace("Candidatus", "Ca.") |>
           str_replace("vaginae", "v.") |>
-          str_replace("sp_", "sp. ") |>
-          str_replace("swidsinskii_leopoldii","swid./leop.") |> 
+          str_replace("sp_", "sp. ") %>%
+          str_c("*", ., "*") |>
+          str_replace("\\*Candidatus .*", "*Ca.* Lachnocurva v. (BVAB1)") |>
+          str_replace(" \\((.+?)\\)\\*", "* (\\1)") |>
+          str_replace("\\*Other\\*", "Other") |>
+          str_replace("jensenii/mulieres", "jense./mulie.") |> 
           fct_inorder(),
         Arm = ARM |> str_replace("ACTIN","actin") |> fct_inorder()
-        )
+        ) # |> select(taxon_group) |> distinct()
     
     y_lims <- c(0, 1 + 0.08 * add_BV) + c(-1, 1) * 0.001
 
@@ -108,7 +111,9 @@ plot_taxa_composition <-
         ) +
       theme(
         axis.text.x = element_blank(),
-        legend.position = "right"
+        legend.position = "right",
+        legend.text = element_markdown(),
+        strip.text.x = element_markdown()
       )
     
     if (facet_by_endpoint)

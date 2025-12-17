@@ -11,7 +11,7 @@ format:
     theme: journal
     embed-resources: true
 execute:
-  cache: refresh # true refresh
+  cache: true # true refresh
   warning: false
 project:
   execute-dir: project
@@ -591,7 +591,18 @@ topics_long <-
   unnest(topic) |>
   pivot_longer(cols = -c(USUBJID, most_prev_genus), names_to = "topic", values_to = "prop") |>
   # arrange(most_prev_genus, -prop) |> 
-  mutate(topic = topic |> fct_inorder() |> fct_relevel("Ca. L. v. (BVAB1) topic", after = Inf))
+  mutate(
+    topic = 
+      topic |> fct_inorder() |> 
+      fct_relevel("Ca. L. v. (BVAB1) topic", after = Inf),
+    topic_print =
+      case_when(
+        str_detect(topic, "BVAB1") ~ "*Ca.* L. v. (BVAB1) topic",
+        str_detect(topic, "topic") ~ str_c("*", topic |> str_remove(" topic"), "*"),
+        str_detect(topic, "Other") ~ str_c("Other *L.*"),
+        TRUE ~ str_c("*",topic,"*") 
+      ) |> factor() |> fct_reorder(topic |> as.numeric())
+    ) 
 
 ```
 
@@ -629,7 +640,7 @@ outcomes_ordered_filtered <-
   select(USUBJID, ARM, contains("_week_")) |> 
   pivot_longer(cols = contains("_week_"), names_to = "outcome", values_to = "value") |> 
   mutate(
-    Outcome = ifelse(str_detect(outcome, "Lc"), "≥50%\nL.c.", "rBV"),
+    Outcome = ifelse(str_detect(outcome, "Lc"), "≥50%<br>*L.c.*", "rBV"),
     week = str_c(
       ifelse(str_detect(outcome, "Lc"), "at W", "by W"),
       outcome |> parse_number()
@@ -663,6 +674,7 @@ g_observed_topics <-
   scale_fill_manual(
     "Taxon or Topic", 
     values = get_topic_colors(topics_long$topic |> levels()),
+    labels = topics_long$topic_print |> levels(),
     guide = guide_legend(direction = "vertical")
     ) +
   scale_x_discrete(
@@ -670,7 +682,8 @@ g_observed_topics <-
     breaks = NULL
     ) +
   theme(
-    legend.position = "right"
+    legend.position = "right",
+    legend.text = ggtext::element_markdown()
   )
 
 # g_observed_topics
@@ -699,6 +712,8 @@ g_observed_outcomes <-
     ) +
   ylab("") +
   theme(
+    legend.text = ggtext::element_markdown(),
+    strip.text.y = ggtext::element_markdown(),
     legend.position = "right"# , strip.text.y = element_text(angle = -90, hjust = 0.5)
   )
 
@@ -724,7 +739,7 @@ g_observed_outcomes <-
 
 g_observed_topics_incl <- 
   topics_long_ordered_filtered |> 
-  filter(most_prev_genus != "Sneathia", most_prev_genus != "Fannyhessea") |>
+  filter(most_prev_genus != "Sneathia", most_prev_genus != "Fannyhessea", most_prev_genus != "Bifidobacterium") |>
   arrange(most_prev_genus) |> 
   mutate(mpg = most_prev_genus |> str_replace("actobacillus", "\\.") |> str_replace("Ca. Lachn. \\(BVAB1\\)", "BVAB1") |>  fct_inorder()) |>
   ggplot() +
@@ -735,6 +750,7 @@ g_observed_topics_incl <-
   scale_fill_manual(
     "Taxon or Topic", 
     values = get_topic_colors(topics_long$topic |> levels()),
+    labels = topics_long$topic_print |> levels(),
     guide = guide_legend(direction = "vertical")
     ) +
   scale_x_discrete(
@@ -742,7 +758,8 @@ g_observed_topics_incl <-
     breaks = NULL
     ) +
   theme(
-    legend.position = "right"
+    legend.position = "right",
+    legend.text = ggtext::element_markdown()
   )
 
 # g_observed_topics
@@ -755,9 +772,17 @@ g_observed_topics_incl <-
 g_observed_outcomes_incl <-
   outcomes_ordered_filtered |> 
   left_join(topics_long_ordered_filtered |> select(USUBJID, most_prev_genus) |> distinct(), by = "USUBJID") |>
-  filter(most_prev_genus != "Sneathia", most_prev_genus != "Fannyhessea") |> 
+  filter(most_prev_genus != "Sneathia", most_prev_genus != "Fannyhessea", most_prev_genus != "Bifidobacterium") |> 
   arrange(most_prev_genus) |> 
-  mutate(mpg = most_prev_genus |> str_replace("actobacillus", "\\.") |> str_replace("Ca. Lachn. \\(BVAB1\\)", "BVAB1") |>  fct_inorder()) |>
+  mutate(
+    mpg = 
+      str_c("*", most_prev_genus, "*") |> 
+      str_replace("actobacillus", ".") |> 
+      str_replace("\\*Ca. Lachn. \\(BVAB1\\)\\*", "BVAB1") |>  
+      fct_inorder()# ,
+    # Outcome = Outcome |> str_replace("L\\.c\\.", "*L.c.*"),
+    # Outcome_facet = Outcome |> str_replace("\n", "<br>"),
+    ) |>
   ggplot() +
   aes(x = USUBJID, y = week |> fct_rev(), fill = Outcome, alpha = value) +
   geom_tile() +
@@ -776,10 +801,13 @@ g_observed_outcomes_incl <-
     ) +
   ylab("") +
   theme(
+    strip.text.x = ggtext::element_markdown(),
+    strip.text.y = ggtext::element_markdown(),
+    legend.text = ggtext::element_markdown(),
     legend.position = "right"# , strip.text.y = element_text(angle = -90, hjust = 0.5)
   )
 
-# g_observed_outcomes
+# g_observed_outcomes_incl
 
 ```
 
@@ -870,7 +898,7 @@ Strata with less than 2 participants per arm are excluded from the analysis.
 plot_stratified_risks(AYV |> filter(!(most_prev_genus %in% c("Sneathia", "Fannyhessea"))), outcomes, strata = "most_prev_genus", min_n_in_each_arm = 2) +
   plot_stratified_differences(AYV |> filter(!(most_prev_genus %in% c("Sneathia", "Fannyhessea"))), outcomes, strata = "most_prev_genus", min_n_in_each_arm = 2) +
   plot_layout(ncol = 1) &
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1))
   
 ```
 
@@ -903,6 +931,71 @@ models_most_prevalent_genus |>
   ) 
 
 ```
+
+
+
+```{r}
+#| eval: false
+
+differences <- 
+    map(
+      outcomes, 
+      ~ get_RD(AYV, outcome = .x, covariate = "most_prev_genus", min_n_each_arm = 2) |> 
+        mutate(outcome = .x)
+    ) |> 
+    bind_rows() 
+
+n_per_arm_strata_and_outcome_long <- 
+    map(
+      outcomes, 
+      .f = function(outcome, AYV, covariate, min_n_in_each_arm){
+        AYV |> 
+          select(ARM, all_of(c(outcome, covariate))) |>
+          mutate(outcome = outcome, outcome_value = .data[[outcome]]) |>
+          drop_na() |> 
+          group_by(ARM, .data[[covariate]]) |> mutate(min_n = min(n())) |> ungroup() |> 
+          group_by(.data[[covariate]]) |> 
+          mutate(min_n = min(min_n), n_arm = ARM |> unique() |> length()) |> 
+          ungroup() |> 
+          filter(n_arm == 2, min_n >= min_n_in_each_arm) |> 
+          group_by(outcome, .data[[covariate]], ARM, outcome_value) |> 
+          summarize(n = n(), .groups = "drop") |> 
+          arrange(, outcome, .data[[covariate]], ARM, outcome_value)
+      },
+      AYV = AYV, covariate = "most_prev_genus", min_n_in_each_arm = 2
+    ) |> 
+  bind_rows()
+
+n_per_arm_strata_and_outcome <- 
+  n_per_arm_strata_and_outcome_long |> 
+  pivot_wider(names_from = c(ARM, outcome_value), values_from = n, values_fill = 0) |> 
+  select(outcome, most_prev_genus, starts_with("LACTIN-V_"), starts_with("Placebo_")) |> 
+  mutate(
+    `n_LACTIN-V` = rowSums(across(starts_with("LACTIN-V_"))),
+    `n_Placebo` = rowSums(across(starts_with("Placebo"))),
+    n = `n_LACTIN-V` + `n_Placebo`,
+    `p_LACTIN-V` = `LACTIN-V_1` / (`LACTIN-V_0` + `LACTIN-V_1`),
+    `p_Placebo` = `Placebo_1` / (`Placebo_0` + `Placebo_1`),
+    RD = `p_LACTIN-V` - `p_Placebo`,
+    RD_SE = 
+      sqrt(
+        `p_LACTIN-V` * (1 - `p_LACTIN-V`) / `n_LACTIN-V` + 
+          `p_Placebo` * (1 - `p_Placebo`) / `n_Placebo`
+      )
+  )
+
+
+n_per_arm_strata_and_outcome |> 
+  group_by(outcome) |> 
+  summarize(
+    pval = biostatUZH::gailSimon(RD, RD_SE)[1],
+    stat = biostatUZH::gailSimon(RD, RD_SE)[2]
+  )
+
+# no evidence of qualitative heterogeneity (all p >>> 0.05)
+
+```
+
 
 ## Heterogeneity by pre-MTZ subCSTs
 
@@ -956,7 +1049,7 @@ pvals_csts |> gt(
 #| fig-height: 6
 
 g <- 
-plot_stratified_risks(AYV, outcomes, strata = "subCST", min_n_in_each_arm = 2) +
+  plot_stratified_risks(AYV, outcomes, strata = "subCST", min_n_in_each_arm = 2) +
   plot_stratified_differences(AYV, outcomes, strata = "subCST", min_n_in_each_arm = 2) +
   xlab("CST") +
   geom_label(
@@ -965,24 +1058,28 @@ plot_stratified_risks(AYV, outcomes, strata = "subCST", min_n_in_each_arm = 2) +
       mutate(
         outcome_label = 
           outcome |> 
-          str_replace("Lc_", "≥50% L. crisp. at ") |> 
+          str_replace("Lc_", "≥50% *L. crisp.* at ") |> 
           str_replace("rBV_", "any rBV by ") |> 
           str_replace("week_", "week ") 
       ), 
     aes(label = str_c("adj. p: ", `BH adjusted p-value`)),
     x = -Inf, y = -Inf, hjust = -0.1, vjust = -0.5, color = "black", size = 3, label.size = 0
   ) +
-
+  
   plot_layout(ncol = 1) 
 
 g
-  
+
 ```
 
 ```{r}
 #| cache: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S5.pdf"), width = 10, height = 6, device = cairo_pdf)
+g_S5A <- g[[1]]
+g_S5B <- g[[2]]
+save(g_S5A, file = str_c(fig_out_dir(), "supplementary_ggplots/S5A.Rdata"))
+save(g_S5B, file = str_c(fig_out_dir(), "supplementary_ggplots/S5B.Rdata"))
+# ggsave(g, filename = str_c(fig_out_dir(), "S5.pdf"), width = 10, height = 6, device = cairo_pdf)
 
 ```
 
@@ -1400,10 +1497,22 @@ pvals <-
     `p-value` = `p-value` |> format.pval(digits = 2),
     outcome_label = 
       outcome |> 
-      str_replace("Lc_", "≥50% L. crisp. at ") |> 
+      str_replace("Lc_", "≥50% *L. crisp.* at ") |> 
       str_replace("rBV_", "any rBV by ") |> 
       str_replace("week_", "week ") 
   ) 
+```
+
+
+```{r}
+AYV <- 
+  AYV |> 
+  mutate(
+    most_prev_genus_2 =
+      str_c("*", most_prev_genus, "*") |> 
+      str_replace(" Lachn\\. \\(BVAB1\\)\\*", "* Lachn.<br>(BVAB1)") |> 
+      factor() |> fct_reorder(most_prev_genus |> as.numeric())
+  )
 ```
 
 
@@ -1413,11 +1522,11 @@ pvals <-
 g_strat_LC <- 
   (
       (
-        plot_stratified_risks(AYV, outcomes[1:2], strata = "most_prev_genus", min_n_in_each_arm = 2) +
+        plot_stratified_risks(AYV, outcomes[1:2], strata = "most_prev_genus_2", min_n_in_each_arm = 2) +
           guides(col = "none") 
         ) /
         (
-        plot_stratified_differences(AYV, outcomes[1:2], strata = "most_prev_genus", min_n_in_each_arm = 2) +
+        plot_stratified_differences(AYV, outcomes[1:2], strata = "most_prev_genus_2", min_n_in_each_arm = 2) +
          guides(col = "none") +
           geom_label(
             data = pvals |> filter(outcome == outcomes[1:2]), 
@@ -1431,10 +1540,10 @@ g_strat_LC <-
 g_strat_rBV <- 
   (
       (
-        plot_stratified_risks(AYV, outcomes[3:4], strata = "most_prev_genus", min_n_in_each_arm = 2) 
+        plot_stratified_risks(AYV, outcomes[3:4], strata = "most_prev_genus_2", min_n_in_each_arm = 2) 
         ) /
         (
-        plot_stratified_differences(AYV, outcomes[3:4], strata = "most_prev_genus", min_n_in_each_arm = 2) +
+        plot_stratified_differences(AYV, outcomes[3:4], strata = "most_prev_genus_2", min_n_in_each_arm = 2) +
           geom_label(
             data = pvals |> filter(outcome == outcomes[3:4]), 
             aes(label = str_c("adj. p: ", `BH adjusted p-value`)),
@@ -1466,7 +1575,7 @@ fig_5 <-
   # stratified analysis
   
   ( 
-    (g_strat_LC | g_strat_rBV) + plot_layout(ncol = 2) & theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    (g_strat_LC | g_strat_rBV) + plot_layout(ncol = 2) & theme(axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1))
   ) +
   
   # assembly

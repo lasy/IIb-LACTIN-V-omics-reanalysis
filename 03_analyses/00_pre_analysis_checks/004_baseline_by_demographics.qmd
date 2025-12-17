@@ -191,6 +191,23 @@ g_shannon <-
   ) +
   guides(fill = "none")
 
+
+g_shannon <- 
+  df_load |> 
+  filter(!is.na(shannon_v0)) |> 
+  ggplot() +
+  aes(y = RACEGR2, x = shannon_v0, fill = RACEGR2) +
+   geom_boxplot(alpha = 0.5, outlier.shape = NULL) +
+  geom_point(alpha = 0.5) +
+  labs(
+    y = "Self-declared race",
+    x = "pre-MTZ α-diversity\n(Shannon index on taxa proportions)"
+  ) +
+  scale_fill_manual(
+    "Self-declared race", values = c("purple1", "darkseagreen2", "gold3")
+  ) +
+  guides(fill = "none")
+
 g_lm <- 
   df_load |> 
   filter(!is.na(LOAD), !is.na(shannon_v0)) |> 
@@ -248,6 +265,24 @@ g_1 <-
   )
 
 
+g_race_edu <- 
+  t_1 |> 
+  arrange(EDULVL) |> 
+  ggplot() +
+  aes(y = RACEGR2 |> fct_rev(), x = EDULVL |> str_wrap(width = 15) |> fct_inorder(), fill = RACEGR2) +
+  geom_tile(aes(alpha = n)) +
+  geom_text(aes(label = n)) + 
+  # scale_alpha(range = c(0,1)) +
+  # scale_fill_gradient(low = "white", high = "steelblue") +
+  ylab("Self-declared\nparticipants' race") + xlab("Education\n") +
+  scale_fill_manual(values = c("purple1", "darkseagreen3", "gold3")) +
+  guides(fill = "none", alpha = "none") +
+  theme(
+    # axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(angle = 0, hjust = 1, vjust = 1, margin = margin(r = -40))
+  )
+
+
 ```
 ```{r}
 
@@ -288,7 +323,56 @@ g_shannon <-
   ) +
   guides(fill = "none", col = "none")
 
+
+g_shannon <- 
+  df_shannon_v0 |> 
+  ggplot() +
+  aes(y = RACEGR2 |> fct_rev(), x = shannon_v0, fill = RACEGR2) +
+  geom_violin(alpha = 0.5, draw_quantiles = 0.5, color = "white", linewidth = 1) +
+  # geom_point(alpha = 0.5) +
+  ggbeeswarm::geom_quasirandom(width = 0.3, size = 0.5, aes(col = RACEGR2)) +
+  labs(
+    y = "Self-declared race",
+    x = "pre-MTZ α-diversity\n(Shannon index on taxa proportions)"
+  ) +
+  scale_fill_manual(
+    "Self-declared race", values = c("purple1", "darkseagreen3", "gold3")
+  ) +
+  scale_color_manual(
+    "Self-declared race", values = c("purple1", "darkseagreen3", "gold3")
+  ) +
+  guides(fill = "none", col = "none")
+
 ```
+
+```{r}
+
+g_race_by_site <- 
+  mae@colData |> 
+  as_tibble() |> 
+  filter(!is.na(ARM)) |> 
+  select(USUBJID, ARM, SITENAME, RACEGR2) |> 
+  distinct() |> 
+  dplyr::count(SITENAME, RACEGR2) |>
+  group_by(SITENAME) |> 
+  mutate(
+    perc = n / sum(n) * 100,
+    label = str_c(n, "\n(", round(perc, 1), "%)")
+    ) |> 
+  ungroup() |> 
+  ggplot() +
+  aes(x = SITENAME |> str_wrap(width = 14), y = RACEGR2 |> fct_rev(), fill = RACEGR2) +
+  geom_tile(aes(alpha = perc)) +
+  geom_text(aes(label = label)) + 
+  xlab("Study site\n") + ylab("Self-declared\nparticipants's race") +
+  scale_fill_manual(values = c("purple1", "darkseagreen3", "gold3")) +
+  guides(fill = "none", alpha = "none") +
+  theme(
+    axis.title.y = element_text(angle = 0, hjust = 1, vjust = 1, margin = margin(r = -60))
+  )
+
+```
+
 
 
 ```{r}
@@ -298,8 +382,10 @@ g_shannon <-
 i <- 2
 
 g <- 
-g_1 + labs(tag = LETTERS[i]) + 
-  g_shannon + labs(tag = LETTERS[i + 1])
+  g_race_edu + labs(tag = LETTERS[i]) + 
+  g_shannon + labs(tag = LETTERS[i + 1]) + ylab("") + theme(axis.text.y = element_blank()) +
+  g_race_by_site + labs(tag = LETTERS[i + 2]) + ylab("") + theme(axis.text.y = element_blank()) +
+  plot_layout(ncol = 3, widths = c(1.3, 1, 1))
 
 g
 
@@ -308,6 +394,15 @@ g
 ```{r}
 #| cache: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S7BC.pdf"), width = 13, height = 4, device = cairo_pdf)
+g_S7B <- g_race_edu
+g_S7C <- g_shannon
+g_S7D <- g_race_by_site
+
+save(g_S7B, file = str_c(fig_out_dir(), "supplementary_ggplots/S7B.Rdata"))
+save(g_S7C, file = str_c(fig_out_dir(), "supplementary_ggplots/S7C.Rdata"))
+save(g_S7D, file = str_c(fig_out_dir(), "supplementary_ggplots/S7D.Rdata"))
+
+
+# ggsave(g, filename = str_c(fig_out_dir(), "S7BC.pdf"), width = 13, height = 4, device = cairo_pdf)
 
 ```

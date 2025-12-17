@@ -1,0 +1,13 @@
+"0",""
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S5A.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S5A
+"
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S5B.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S5B
+"

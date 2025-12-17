@@ -165,14 +165,13 @@ g2
 
 ```{r}
 
+g_S1B <- g1
+save(g_S1B, file = str_c(fig_out_dir(), "supplementary_ggplots/S1B.Rdata"))
+g_S1C <- g2
+save(g_S1C, file = str_c(fig_out_dir(), "supplementary_ggplots/S1C.Rdata"))
 
-  ggsave(g1, filename = str_c(fig_out_dir(), "S1B.pdf"), width = 13, height = 4, device = cairo_pdf)
-
-```
-
-```{r}
-
-  ggsave(g2, filename = str_c(fig_out_dir(), "S1C.pdf"), width = 13, height = 4, device = cairo_pdf)
+# ggsave(g1, filename = str_c(fig_out_dir(), "S1B.pdf"), width = 13, height = 4, device = cairo_pdf)
+# ggsave(g2, filename = str_c(fig_out_dir(), "S1C.pdf"), width = 13, height = 4, device = cairo_pdf)
 
 ```
 

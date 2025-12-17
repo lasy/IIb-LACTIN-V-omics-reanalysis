@@ -44,19 +44,19 @@ get_topic_colors <- function(topic_names){
       tibble(topic = c("II", "L. gasseri"), color = "gold"), 
       tibble(topic = c("III", "L. iners"),  color = "seagreen3"),   # forestgreen
       tibble(topic = c("III-B"), color = "seagreen4"), 
-      tibble(topic = c("IV", "Gardnerella (g)", "G. s./l. topic"), color = "dodgerblue2"),
+      tibble(topic = c("IV", "Gardnerella (g)", "G. s./l. topic", "Gardnerella topic"), color = "dodgerblue2"),
       tibble(topic = c("IV-A", "Ca. L. v. (BVAB1) topic"), color = "lightskyblue"), #  #CD93D8  # turquoise3
       tibble(topic = "Prevotella (g)", color = "plum2"), #  #CD93D8  # turquoise3
       tibble(topic = c("IV-B", "IV-B.a"), color = "dodgerblue3"), # dodgerblue2 # dodgerblue3
       tibble(topic = "IV-B.b", color = "dodgerblue4"),
       tibble(topic = c("IV-O.a", "P. bivia topic"), color = "slateblue4"),
       tibble(topic = "Fannyhessea (g)", color = "slateblue4"),
-      tibble(topic = c("IV-O.b", "P. amnii topic"), color = "plum"),
+      tibble(topic = c("IV-O.b", "P. amnii topic", "P. timonensis topic"), color = "plum"),
       tibble(topic = "Megasphera (g)", color = "yellow2"),
       tibble(topic = c('Ca. Lachnocurva vag. ("BVAB1")'), color = "lightskyblue"),
       tibble(topic = c('other non-Lacto. A'), color = "deeppink2"),
       tibble(topic = c('other non-Lacto. B'), color = "pink"),
-      tibble(topic = c("V", "L. jensenii"), color = "tomato"),
+      tibble(topic = c("V", "L. jensenii", "L. jens./mul.", "L. jensenii/mulieres"), color = "tomato"),
       tibble(topic = c("VI", "Lactobacillus (other)", "Other L."), color = "tomato4")
     )
   

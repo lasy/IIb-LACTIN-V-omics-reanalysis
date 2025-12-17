@@ -1,0 +1,7 @@
+"0",""
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S8.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S8
+"

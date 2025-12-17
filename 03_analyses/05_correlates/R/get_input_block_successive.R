@@ -13,7 +13,11 @@ get_input_blocks_successive <- function(){
 get_block_data_successive <- function(block, mae, PID, target_visits, microbiota_assay){
   # cat(block,"\n")
   
-  if (block == "Demographics") res <- get_demographics(mae, PID, target_visits)
+  res <- NULL
+  
+  if (block == "Demographics") res <- get_demographics(mae, PID, target_visits, add_site = FALSE)
+  if (block == "Demographics with site") res <- get_demographics(mae, PID, target_visits, add_site = TRUE)
+  
   
   if (block == "Microbiota pre-MTZ") res <- get_baseline_microbiota(mae, PID, target_visits, microbiota_assay = microbiota_assay)
   if (block == "Vag. env. pre-MTZ") res <- get_baseline_environment(mae, PID, target_visits)
@@ -32,6 +36,9 @@ get_block_data_successive <- function(block, mae, PID, target_visits, microbiota
   
   if (str_detect(block, "pre-MTZ")) colnames(res$data) <- colnames(res$data) |> str_c(" (pre-MTZ)")
     
+  if (is.null(res)) {
+    stop('Block "', block, '" not recognized.')
+  }
     
   res
 }
@@ -444,8 +451,8 @@ get_prev_visit_microbiota <- function(mae, PID, target_visits, microbiota_assay)
 }
 
 
-get_demographics <- function(mae, PID, target_visits) {
-  
+get_demographics <- function(mae, PID, target_visits, add_site = FALSE){
+
   clin <- MultiAssayExperiment::colData(mae) |> as.data.frame() |> 
     mutate(N_PAST_BV = N_PAST_BV |> forcats::fct_relevel("Unknown",  after = 2L))
 
@@ -462,11 +469,41 @@ get_demographics <- function(mae, PID, target_visits) {
       `Education level` = `Education level` |>  as.integer()
     ) |> 
     arrange(RACEGR2) %>% 
-    mutate(tmp = 1) %>% 
+    mutate(tmp = 1, RACEGR2 = RACEGR2 |> str_replace("Black/African American","Black/Af.Am.")) %>% 
     tidyr::pivot_wider(
       names_from = RACEGR2, values_from = tmp, values_fill = 0,
-      names_prefix = "Race: "
-    ) |> 
+      names_prefix = "Self-declared race: "
+    )
+  
+  if (add_site) {
+    dem_data <- 
+      dem_data |> 
+      left_join(
+        clin |> 
+          filter(!is.na(ARM)) |> 
+          select(USUBJID, SITENAME) |> 
+          distinct() |> 
+          mutate(
+            site = case_when(
+              SITENAME %in% c("San Francisco General Hospital") ~ "SF Gen. Hosp.",
+              SITENAME %in% c("Washington University in St. Louis") ~ "WUSTL",
+              SITENAME %in% c("Stroger Hospital of Cook County") ~ "Stroger Hosp.",
+              SITENAME %in% c("University of California, San Diego") ~ "UCSD",
+              TRUE ~ "Other"
+            )
+          ) |> 
+          select(-SITENAME) |> 
+          mutate(tmp = 1) |> 
+          tidyr::pivot_wider(
+            names_from = site, values_from = tmp, values_fill = 0,
+            names_prefix = "Study site: "
+          ),
+        by = join_by(USUBJID)
+      )
+  }
+  
+  dem_data <- 
+    dem_data |>
     mutate(key = str_c(USUBJID, "_", AVISITN)) |> select(-USUBJID, -AVISITN) |> 
     arrange(key) |> 
     as.data.frame() |> 

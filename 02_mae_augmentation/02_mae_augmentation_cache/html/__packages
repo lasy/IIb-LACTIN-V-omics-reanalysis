@@ -17,13 +17,3 @@ ggthemes
 phyloseq
 ValenciaR
 alto
-matrixStats
-MatrixGenerics
-BiocGenerics
-S4Vectors
-IRanges
-GenomeInfoDb
-GenomicRanges
-Biobase
-SummarizedExperiment
-MultiAssayExperiment

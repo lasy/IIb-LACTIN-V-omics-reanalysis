@@ -276,6 +276,7 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 25
 #| fig-height: 45
+#| fig-dpi: 40
 
 plot_mbplsda_outputs(mod_res = mod_res)
 
@@ -328,6 +329,7 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -365,6 +367,7 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -403,6 +406,7 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -505,6 +509,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -545,6 +551,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+#| 
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -582,6 +590,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -619,6 +629,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -718,6 +730,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -756,6 +770,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -794,6 +810,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -831,6 +849,8 @@ mod_res <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbpls
 ```{r}
 #| fig-width: 15
 #| fig-height: 25
+#| fig-dpi: 50
+
 plot_mbplsda_outputs(mod_res = mod_res)
 ```
 
@@ -1110,6 +1130,120 @@ plot_confusion_matrix(mod_week24_min$output_fct, pred_outcomes = mod_week24_min$
   ggtitle("", subtitle = "Minimal model") +
 
   plot_layout(guides = "collect", nrow = 4, byrow = FALSE)
+
+```
+
+```{r}
+
+compare_coefs <- function(coefs){
+
+  ggplot(coefs) +
+    aes(y = variable |> fct_rev(), x = value, col = model, 
+        alpha = CI_excludes_0) + 
+    facet_grid(block ~ Yvar, scales = "free_y", 
+               space = "free_y") +
+    geom_vline(xintercept = 0, col = "gray50") + 
+    geom_linerange(
+      aes(xmin = lo, xmax = up), 
+      position = position_dodge(width = 0.5),
+      lineend = "round"
+    ) + 
+    geom_point(position = position_dodge(width = 0.5)) + 
+    ylab("") + 
+    xlab("coefficient") + 
+    scale_alpha_continuous(breaks = c(0, 1), range = c(0.3, 1)) + 
+    guides(fill = "none", alpha = "none") + 
+    theme(
+      strip.text = element_text(color = "black"), 
+      strip.text.y = element_text(angle = 0, hjust = 0)
+    )
+}
+
+```
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+
+coefs <-
+  bind_rows(
+    get_mtb_coef(mod_week4$res, boot = mod_week4$boot) |> 
+      mutate(model = "Full"),
+    get_mtb_coef(mod_week4_ext$res, boot = mod_week4_ext$boot) |> 
+      mutate(model = "Extended"),
+    get_mtb_coef(mod_week4_red$res, boot = mod_week4_red$boot) |> 
+      mutate(model = "Reduced"),
+    get_mtb_coef(mod_week4_min$res, boot = mod_week4_min$boot) |> 
+      mutate(model = "Minimal")
+  ) |> 
+  mutate(
+    model = model |> fct_inorder(),
+    CI_excludes_0 = if_else(lo * up > 0, 1, 0),
+    block = block |> fct_inorder()
+    )
+
+compare_coefs(coefs) +
+  ggtitle("Initial phase (post-MTZ to week 4)")
+
+```
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+
+coefs <-
+  bind_rows(
+    get_mtb_coef(mod_week8_and_12$res, boot = mod_week8_and_12$boot) |> 
+      mutate(model = "Full"),
+    get_mtb_coef(mod_week8_and_12_ext$res, boot = mod_week8_and_12_ext$boot) |> 
+      mutate(model = "Extended"),
+    get_mtb_coef(mod_week8_and_12_red$res, boot = mod_week8_and_12_red$boot) |> 
+      mutate(model = "Reduced"),
+    get_mtb_coef(mod_week8_and_12_min$res, boot = mod_week8_and_12_min$boot) |> 
+      mutate(model = "Minimal")
+  ) |> 
+  mutate(
+    model = model |> fct_inorder(),
+    CI_excludes_0 = if_else(lo * up > 0, 1, 0),
+    block = block |> fct_inorder()
+    )
+
+compare_coefs(coefs) +
+  ggtitle("Continuation phase (week 4 to week 8 to week 12)")
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+
+coefs <-
+  bind_rows(
+    get_mtb_coef(mod_week24$res, boot = mod_week24$boot) |> 
+      mutate(model = "Full"),
+    get_mtb_coef(mod_week24_ext$res, boot = mod_week24_ext$boot) |> 
+      mutate(model = "Extended"),
+    get_mtb_coef(mod_week24_red$res, boot = mod_week24_red$boot) |> 
+      mutate(model = "Reduced"),
+    get_mtb_coef(mod_week24_min$res, boot = mod_week24_min$boot) |> 
+      mutate(model = "Minimal")
+  ) |> 
+  mutate(
+    model = model |> fct_inorder(),
+    CI_excludes_0 = if_else(lo * up > 0, 1, 0),
+    block = block |> fct_inorder()
+    )
+
+compare_coefs(coefs) +
+  ggtitle("Follow-up phase (week 12 to week 24)")
 
 ```
 
@@ -2451,7 +2585,7 @@ df |>
 
 
 df |> 
-  ggplot(aes(x = `G. s./l. topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  ggplot(aes(x = `Gardnerella topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
   geom_jitter(height = 0.1, size = 0.5) +
   geom_smooth(method = "lm") 
 
@@ -2462,11 +2596,337 @@ df |>
   geom_smooth(method = "lm") 
 
 df |> 
-  ggplot(aes(x = `P. amnii topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
+  ggplot(aes(x = `P. timonensis topic (pre-MTZ)`, y = pmax(`Any condomless sex`, `Any condom sex`))) +
   geom_jitter(height = 0.1, size = 0.5) +
   geom_smooth(method = "lm") 
 
 
+```
+
+
+
+### Sensitivity analysis by sites
+
+
+
+Re-fitting the full models in each trial phase, including "study site" as a covariate in the demographics block.
+
+
+```{r}
+model_par$model <- "full"
+mbplsda_par$opt_ncomp_max <- n_resp_cat - 1
+
+```
+
+
+
+
+#### From post-MTZ to week 4
+
+```{r}
+
+model_par$target_visit <- 2
+
+model_par$input_blocks <- mod_week4$inputs_raw |> names()
+model_par$input_blocks <- model_par$input_blocks |> str_replace("Demographics", "Demographics with site")
+model_par$model_name <- mod_week4$model_name |> str_c(" site included in demographics")
+
+mod_res4_sites <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+
+```
+
+
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+
+coefs <-
+  bind_rows(
+    get_mtb_coef(mod_res4_sites$res, boot = mod_res4_sites$boot) |> 
+      mutate(model = "With site", block = block |> str_remove(" with site")),
+    get_mtb_coef(mod_week4$res, boot = mod_week4$boot) |> 
+      mutate(model = "Original")
+  ) |> 
+  mutate(
+    CI_excludes_0 = if_else(lo * up > 0, 1, 0),
+    block = block |> fct_inorder()
+    )
+
+compare_coefs(coefs) +
+  ggtitle("Initial phase (post-MTZ to week 4)")
+
+```
+
+
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6
+
+plot_mtb_cov(mod_week4$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("post-MTZ to week 4 - without sites") + 
+plot_mtb_cov(mod_res4_sites$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("post-MTZ to week 4 - with sites") +
+  plot_layout(guides = "collect", nrow = 2)
+
+```
+
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week4$res, boot = mod_week4$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Initial phase - without site", subtitle = "post-MTZ to week 4") + 
+  
+  plot_mtb_relbipc(mod_res4_sites$res, boot = mod_res4_sites$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Initial phase - with site", subtitle = "post-MTZ to week 4") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+#### From week 4 to week 8 and 12
+
+```{r}
+
+model_par$target_visit <- 4
+
+model_par$input_blocks <- mod_week8_and_12$inputs_raw |> names()
+model_par$input_blocks <- model_par$input_blocks |> str_replace("Demographics", "Demographics with site")
+model_par$model_name <- mod_week8_and_12$model_name |> str_c(" site included in demographics")
+
+mod_res8_and_12_sites <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+
+```
+
+
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+coefs <-
+  bind_rows(
+    get_mtb_coef(mod_res8_and_12_sites$res, boot = mod_res8_and_12_sites$boot) |> 
+      mutate(model = "With site", block = block |> str_remove(" with site")),
+    get_mtb_coef(mod_week8_and_12$res, boot = mod_week8_and_12$boot) |> 
+      mutate(model = "Original")
+  ) |> 
+  mutate(
+    CI_excludes_0 = if_else(lo * up > 0, 1, 0),
+    block = block |> fct_inorder()
+    )
+
+
+
+compare_coefs(coefs) +
+  ggtitle("Continuation phase (Week 4 to 8 and 12)")
+
+
+```
+
+
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6
+
+plot_mtb_cov(mod_week8_and_12$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Week 4 to week 8 and 12 - without sites") + 
+plot_mtb_cov(mod_res8_and_12_sites$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Week 4 to week 8 and 12 - with sites") +
+  plot_layout(guides = "collect", nrow = 2)
+
+```
+
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week8_and_12$res, boot = mod_week8_and_12$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Continuation phase - without site", subtitle = "week 4 to week 8 and 12") + 
+  
+  plot_mtb_relbipc(mod_res8_and_12_sites$res, boot = mod_res8_and_12_sites$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Continuation phase - with site", subtitle = "week 4 to week 8 and 12") +
+  
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+#### From week 12 to 24
+
+```{r}
+
+model_par$target_visit <- 7
+
+model_par$input_blocks <- mod_week24$inputs_raw |> names()
+model_par$input_blocks <- model_par$input_blocks |> str_replace("Demographics", "Demographics with site")
+model_par$model_name <- mod_week24$model_name |> str_c(" site included in demographics")
+
+mod_res24_sites <- perform_MBPLSDA_successive(model_par = model_par, mbplsda_par = mbplsda_par, IO_par = IO_par)
+
+```
+
+
+
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+coefs <-
+  bind_rows(
+    get_mtb_coef(mod_res24_sites$res, boot = mod_res24_sites$boot) |> 
+      mutate(model = "With site", block = block |> str_remove(" with site")),
+    get_mtb_coef(mod_week24$res, boot = mod_week24$boot) |> 
+      mutate(model = "Original")
+  ) |> 
+  mutate(
+    CI_excludes_0 = if_else(lo * up > 0, 1, 0),
+    block = block |> fct_inorder()
+    )
+
+compare_coefs(coefs) +
+  ggtitle("Follow-up phase (Week 12 to 24)")
+
+
+```
+
+
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6
+
+plot_mtb_cov(mod_week24$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Week 12 to 24 - without sites") + 
+plot_mtb_cov(mod_res24_sites$res, scale_axes = "fixed") + 
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Week 12 to 24 - with sites") +
+  plot_layout(guides = "collect", nrow = 2)
+
+```
+
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+
+plot_mtb_relbipc(mod_week24$res, boot = mod_week24$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Follow-up phase - without site", subtitle = "week 12 to week 24") +
+  
+  plot_mtb_relbipc(mod_res24_sites$res, boot = mod_res24_sites$boot) + 
+  geom_vline(xintercept = c(1.5, 4.5, 8.5), linetype = "dashed", col = "gray50") +
+  scale_color_manual(values = block_colors) + 
+  ggtitle("Follow-up phase - with site", subtitle = "week 12 to week 24") +
+
+  plot_layout(guides = "collect", nrow = 1)
+
+```
+
+
+#### Self-declared race by sites
+
+
+```{r}
+
+
+clin |> 
+  filter(!is.na(ARM)) |> 
+  select(USUBJID, SITENAME, RACEGR2) |>
+  distinct() |>
+  dplyr::count(SITENAME, RACEGR2) |> 
+  group_by(SITENAME) |> 
+  mutate(
+    perc = (n / sum(n) * 100),
+    value = str_c(n, " (", perc |> round() ,"%)")
+  ) |> 
+  ungroup() |> 
+  arrange(RACEGR2, -perc) |>
+  select(-n, -perc) |> 
+  mutate(SITENAME = SITENAME |> fct_inorder()) |>
+  pivot_wider(names_from = RACEGR2, values_from = value, values_fill = "0 (0%)") |>
+  arrange(SITENAME) |> 
+  gt(caption = "N (%) of participants by self-declared race at each study site") |> 
+  cols_label(SITENAME = "Study site")
+
+```
+
+#### Explanatory power of sites
+
+
+```{r}
+
+sel_metric <- "average F1 score"
+
+tmp <- 
+    bind_rows(
+      mod_week4$cv$summary |> filter((dim == opt_ncomp) | is.na(dim), metric == sel_metric) |> 
+        mutate(Model = "Original", Phase = "Initial phase"),
+      mod_res4_sites$cv$summary |> filter((dim == opt_ncomp) | is.na(dim), metric == sel_metric) |> 
+        mutate(Model = "With site", Phase = "Initial phase"),
+      mod_week8_and_12$cv$summary |> filter((dim == opt_ncomp) | is.na(dim), metric == sel_metric) |>
+        mutate(Model = "Original", Phase = "Continuation phase"),
+      mod_res8_and_12_sites$cv$summary |> filter((dim == opt_ncomp) | is.na(dim), metric == sel_metric) |> 
+        mutate(Model = "With site", Phase = "Continuation phase"),
+      mod_week24$cv$summary |> filter((dim == opt_ncomp) | is.na(dim), metric == sel_metric) |> 
+        mutate(Model = "Original", Phase = "Follow-up phase"),
+      mod_res24_sites$cv$summary |> filter((dim == opt_ncomp) | is.na(dim), metric == sel_metric) |> 
+        mutate(Model = "With site", Phase = "Follow-up phase")
+    ) |> 
+    mutate(Model = Model |> fct_inorder(), Phase = Phase |> fct_inorder()) 
+  
+  ylab <- str_c(sel_metric, "\n(mean & 95%CI)")
+  if (sel_metric == "average F1 score") ylab <- str_c("Ave. F1 (mean & 95%CI)")
+  
+
+```
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+
+tmp |> 
+  filter(set %in% c("calibration", "validation")) |>
+  ggplot() +
+  aes(x = Model, y = mean, col = set) +
+  facet_grid(. ~ Phase) +
+  geom_errorbar(aes(ymin = `95%CI_lo`, ymax = `95%CI_hi`), width = 0.2) +
+  geom_point() +
+  geom_text(aes(label = set |> str_sub(1,1)), hjust = 0, vjust = 0, nudge_x = 0.2) +
+  scale_color_manual("", values = c("calibration" = "black", "validation" = "turquoise3", "random permutation" = "gray")) +
+  ylab(ylab) + xlab("") +
+  guides(col = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+model_par$input_blocks <- NULL
+model_par$model_name <- NULL
 ```
 
 
@@ -3650,18 +4110,31 @@ g_combined_relbicp <-
 
 block_names <- mod_week4$inputs |> names()
 block_colors <- get_block_colors(block_names)
+sample_colors <- 
+  mod_week4$output_fct |> 
+  str_replace("L. crispatus", "*L. crispatus*") |>
+  str_replace("Lactobacillus", "*Lactobacillus*") |> 
+  factor(
+    levels = c(
+      "≥ 50% *L. crispatus*",
+      "≥ 50% *Lactobacillus*, < 50% *L. crispatus*",
+      "< 50% *Lactobacillus*"
+    )
+  )
 g_biplot <- 
   plot_mtb_biplot(
-  res = mod_week4$res, xaxis = 1, yaxis = 2,  scale_axes = "eig",
-  VIP = TRUE, boot = mod_week4$boot,
-  samples_color = mod_week4$output_fct, 
-  sample_color_scale = 
-    list(name = "", values = get_topic_colors(c("I","III", "IV"))),
-  block_color_scale = 
-    list(name = "", values = block_colors, breaks = block_names),
-  
+    res = mod_week4$res, xaxis = 1, yaxis = 2,  scale_axes = "not eig",
+    VIP = TRUE, boot = mod_week4$boot, var_text_size = 4,
+    samples_color = sample_colors, 
+    sample_color_scale = 
+      list(name = "", values = get_topic_colors(c("I","III", "IV"))),
+    block_color_scale = 
+      list(name = "", values = block_colors, breaks = block_names)
   ) +
-  labs(subtitle = "Post-MTZ to week 4 (Initial phase)")
+  labs(subtitle = "Post-MTZ to week 4 (Initial phase)") +
+  scale_x_continuous(expand = expansion(mult = c(1, 0.5))) +
+  scale_y_continuous(expand = expansion(mult = 0.2)) +
+  theme(legend.text = ggtext::element_markdown())
 
 # g_biplot
 
@@ -3709,21 +4182,92 @@ df <-
     by = join_by(USUBJID)
   )
 
-g_cytokines <- 
+selected_cytokines_df <- 
   df |> 
-  filter(ARM == "LACTIN-V", cytokine %in% c("MIG", "IL-1b"),
-         !is.na(week4_status)) |> 
-  ggplot(aes(x = week4_status, y = transformed_abundances, 
-             col = week4_status, fill = week4_status)) +
-  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
-  geom_jitter(size = 0.5, width = 0.2) +
-  facet_grid(cytokine ~ AVISITN |> get_visit_labels()) +
+  filter(
+    ARM == "LACTIN-V", 
+    cytokine %in% c("MIG", "IL-1b"),
+    !is.na(week4_status)
+  )
+
+g_cytokines <- 
+  selected_cytokines_df |> 
+  arrange(AVISITN) |> 
+  ggplot() +
+  aes(x = week4_status, y = transformed_abundances) +
+  facet_grid(cytokine ~ str_c(AVISITN |> get_visit_labels(), "\nconcentrations") |> fct_inorder()) +
+  geom_boxplot(
+    aes(col = week4_status, fill = week4_status), 
+    alpha = 0.5, outlier.shape = NA
+    ) +
+  geom_jitter(
+    aes(col = week4_status, fill = week4_status),
+    size = 0.5, width = 0.2
+    ) +
   xlab("Colonization category at week 4") +
   scale_color_manual("", values = get_topic_colors(c("I","III","IV"))) +
   scale_fill_manual("", values = get_topic_colors(c("I","III","IV"))) +
   theme(axis.text.x = element_blank()) +
   ylab("Transformed log2(concentrations)")
-# g_cytokines
+
+
+# this is not correct
+t_test_res <- 
+  rstatix::t_test(
+    data = selected_cytokines_df |> group_by(AVISITN, cytokine) |> filter(AVISITN != 1), 
+    formula = transformed_abundances ~ week4_status, 
+    ref.group = "≥ 50% L. crispatus",
+    p.adjust.method = "BH", var.equal = TRUE
+  ) |> 
+  rstatix::add_xy_position(x = "week4_status") 
+
+g_cytokines +
+  ggpubr::stat_pvalue_manual(t_test_res, label = "p.adj.signif", tip.length = 0.01) +
+  labs(
+    caption = "Statistical significance was determined by t-test (reference group: ≥ 50% L. crispatus)\nwith Benjamini-Hochberg correction by visit and cytokine."
+  )
+ 
+ 
+ # The results of the MB-PLS-DA suggest that levels of MIG and IL-1b at baseline (pre-MTZ) are associated with subsequent colonization by L. crispatus at week 4. 
+ # So, we test if the levels of these cytokines at baseline (pre-MTZ) differ between participants who ended up colonizing by L. crispatus at week 4 versus those who did not.
+ # Since we only show these two cytokines, we correct for multiple testing across the two cytokines using the Bonferroni method to control for type 1.
+ # Because there are more than ~40 individuals in each group, we can safely use a t-test and assume equal variance.
+
+t_test_res <- 
+  rstatix::t_test(
+    data = 
+      selected_cytokines_df |> 
+      group_by(AVISITN, cytokine) |> 
+      filter(AVISITN == 0) |> 
+      mutate(
+        week4_status = 
+          ifelse(week4_status == "≥ 50% L. crispatus", 
+                 "≥ 50% L. crispatus", 
+                 "< 50% L. crispatus")
+      ), 
+    formula = transformed_abundances ~ week4_status, 
+    var.equal = TRUE
+  ) |> 
+  mutate(
+    p.adj = p.adjust(p, method = "bonferroni"),
+    p.adj.signif = case_when(
+      p.adj <= 0.001 ~ "***",
+      p.adj <= 0.01 ~ "**",
+      p.adj <= 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  ) |>
+  rstatix::add_xy_position(x = "week4_status") |> 
+  mutate(
+    xmax = 2.5,
+    y.position = y.position * 1.1
+    )
+ 
+# add the segment manually to display test between L. crisp and non-L. crisp dominated at week 4
+g_cytokines <- 
+  g_cytokines +
+  geom_segment(data = t_test_res, aes(x = 1.7, xend = 3.3, y = y.position * 0.9), linewidth = 0.4, col = "gray") + 
+  ggpubr::stat_pvalue_manual(t_test_res, label = "p.adj.signif", tip.length = 0.02, bracket.size = 0.4) 
 
 
 ```
@@ -3744,7 +4288,7 @@ fig_6 <-
   free(g_combined_relbicp) +
   g_biplot + inset_element(g_scree, left = 0.7, bottom = 0.8, right = 1, top = 1, align_to = "plot") +
   g_cytokines + guides(fill = "none", col = "none") +
-  plot_layout(ncol = 2, heights = c(1, 2), width = c(4,3), design = design, guides = "collect") +
+  plot_layout(ncol = 2, heights = c(1, 2), width = c(4.5,3), design = design, guides = "collect") +
   plot_annotation(tag_levels = "A")
 
 fig_6
@@ -3754,7 +4298,7 @@ fig_6
 
 ```{r}
 #| cache: false
-
+set.seed(2)
 ggsave(fig_6, filename = str_c(fig_out_dir(), "Fig6.pdf"), width = 13, height = 9.5, device = cairo_pdf)
 
 ```
@@ -3850,10 +4394,20 @@ g_schema + labs(tag = "A") +
 g
 
 ```
+
+
 ```{r}
 #| cache: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S6.pdf"), width = 13, height = 13, device = cairo_pdf)
+g_6A <- g_schema
+g_6B <- patch_cv
+g_6C <- patch_nested
+
+save(g_6A, file = str_c(fig_out_dir(), "supplementary_ggplots/S6A.Rdata"))
+save(g_6B, file = str_c(fig_out_dir(), "supplementary_ggplots/S6B.Rdata"))
+save(g_6C, file = str_c(fig_out_dir(), "supplementary_ggplots/S6C.Rdata"))
+
+# ggsave(g, filename = str_c(fig_out_dir(), "S6.pdf"), width = 13, height = 13, device = cairo_pdf)
 
 ```
 
@@ -3918,7 +4472,9 @@ g
 ```{r}
 #| cache: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S7A.pdf"), width = 13, height = 12, device = cairo_pdf)
+g_S7A <- g
+save(g_S7A, file = str_c(fig_out_dir(), "supplementary_ggplots/S7A.Rdata"))
+# ggsave(g, filename = str_c(fig_out_dir(), "S7A.pdf"), width = 13, height = 12, device = cairo_pdf)
 
 ```
 
@@ -4040,7 +4596,10 @@ g
 ```{r}
 #| cache: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S8.pdf"), width = 13, height = 12, device = cairo_pdf)
+g_S8 <- g
+save(g_S8, file = str_c(fig_out_dir(), "supplementary_ggplots/S8.Rdata"))
+
+# ggsave(g, filename = str_c(fig_out_dir(), "S8.pdf"), width = 13, height = 12, device = cairo_pdf)
 
 ```
 
@@ -4109,9 +4668,482 @@ g
 ```{r}
 #| cache: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S9.pdf"), width = 13, height = 12, device = cairo_pdf)
+g_S9 <- g
+save(g_S9, file = str_c(fig_out_dir(), "supplementary_ggplots/S9.Rdata"))
+# ggsave(g, filename = str_c(fig_out_dir(), "S9.pdf"), width = 13, height = 12, device = cairo_pdf)
 
 ```
+
+
+
+## Supplementary tables of predictors by arm and outcomes
+
+### Outcomes
+
+```{r}
+target_visits <- c(4, 7) # week 12 and 24
+arms <- c("Placebo", "LACTIN-V")
+```
+
+
+#### rBV
+
+```{r}
+
+Y_rBV <- 
+  mae@colData |> 
+  as.data.frame() |> 
+  as_tibble() |> 
+  filter(ARM %in% arms, AVISITN > 1)  |> 
+  select(USUBJID, AVISITN, BV) |> 
+  arrange(USUBJID, AVISITN) |> 
+  distinct()
+
+Y_rBV <- 
+  Y_rBV |> 
+  full_join(
+    expand_grid(
+      USUBJID = Y_rBV$USUBJID |> unique(),
+      AVISITN = c(4,7)
+      ),
+    by = join_by(USUBJID, AVISITN)
+  ) |> 
+  mutate(BV = BV |> str_replace_na("Missing")) |> 
+  group_by(USUBJID) |> 
+  mutate(
+    n_rBV = cumsum(BV == "Yes"),
+    n_no_rBV = cumsum(BV == "No")
+  ) |> 
+  ungroup() |> 
+  filter(AVISITN %in% target_visits) |>
+  mutate(
+    rBV = 
+      case_when(
+        n_rBV > 0 ~ 1, # "rBV by" if any BV by this week
+        (n_rBV == 0) & (n_no_rBV > 0) ~ 0, # "no rBV by" if no BV and at least one observation until then.
+        TRUE ~ NA_integer_ # if no observation until then -> NA
+      ),
+    week = ifelse(AVISITN == 4, 12, 24)
+  ) |> 
+  mutate(outcome_var = "rBV", outcome = rBV) |> 
+  select(USUBJID, week, outcome_var, outcome)
+  # pivot_wider(
+  #   id_cols = USUBJID, names_from = week, values_from = rBV, names_prefix = "rBV_week_"
+  # )
+
+```
+
+#### *L. crispatus* colonization
+
+```{r}
+
+Y_Lc <- 
+  get_assay_wide_format(mae, "mb_categories_wide") |> 
+  filter(AVISITN %in% target_visits, ARM %in% arms)  |> 
+  select(USUBJID, AVISITN, assay) |>
+  mutate(
+    week = ifelse(AVISITN == 4, 12, 24), 
+    Lc = assay$`≥ 50% L. crispatus`
+    ) |> 
+  mutate(outcome_var = "≥ 50% L.c.", outcome = Lc) |>
+  select(USUBJID, week, outcome_var, outcome) |>
+  # pivot_wider(
+  #   id_cols = USUBJID, names_from = week, values_from = Lc, names_prefix = "Lc_week_"
+  #   ) |>
+  arrange(USUBJID)
+
+```
+
+```{r}
+
+Y <- bind_rows(Y_Lc, Y_rBV) |> arrange(USUBJID, outcome_var, week)
+rm(Y_Lc, Y_rBV)
+
+```
+
+
+### Arms
+
+```{r}
+
+Y <- 
+  Y |> 
+  left_join(
+    mae@colData |> 
+      as.data.frame() |> 
+      as_tibble() |> 
+      select(USUBJID, ARM) |> 
+      distinct(),
+    by = join_by(USUBJID)
+  )
+
+```
+
+
+
+
+### Covariates
+
+#### Baseline covariates/blocks
+
+
+```{r}
+
+baseline <- 
+  mae@colData |> 
+  as.data.frame() |> 
+  as_tibble() |> 
+  filter(ARM %in% arms) |> 
+  select(
+    USUBJID,
+    AGE, EDULVL, RACEGR2, N_PAST_BV
+  ) |> 
+  arrange(USUBJID) |> 
+  distinct()
+
+block <- "Demographics/clinical history"
+
+var_desc <- 
+  bind_rows(
+    tibble(var = "AGE", desc = "Age (years)", block = block),
+    tibble(var = "EDULVL", desc = "Education level", block = block),
+    tibble(var = "RACEGR2", desc = "Self-declared race", block = block),
+    tibble(var = "N_PAST_BV", desc = "N past BV", block = block)
+  )
+  
+
+```
+
+```{r}
+
+pre_MTZ_vag_env <- 
+  get_baseline_environment(
+    mae = mae, PID = baseline$USUBJID, target_visits = 2
+    )$data
+
+
+block <- "pre-MTZ Vag. env."
+
+var_desc <- 
+  bind_rows(
+    var_desc, 
+    tibble(var = "α diversity", desc = "α diversity", block = block),
+    tibble(var = "pH", desc = "pH", block = block)
+  )
+
+pre_MTZ_vag_env <- 
+  pre_MTZ_vag_env |> 
+  rownames_to_column("USUBJID") |> 
+  mutate(USUBJID = USUBJID |> str_remove("_[0-9]+$"))
+  
+```
+
+
+```{r}
+
+pre_MTZ_mb <- 
+  get_baseline_microbiota(
+    mae = mae, PID = baseline$USUBJID, target_visits = 2, microbiota_assay = NULL
+    )$data 
+
+
+block <- "pre-MTZ microbiota"
+
+var_desc <- 
+  bind_rows(
+    var_desc, 
+    tibble(var = colnames(pre_MTZ_mb), desc = colnames(pre_MTZ_mb), block = block)
+  )
+
+pre_MTZ_mb <- 
+  pre_MTZ_mb |> 
+  rownames_to_column("USUBJID") |> 
+  mutate(USUBJID = USUBJID |> str_remove("_[0-9]+$"))
+  
+```
+
+
+
+```{r}
+
+pre_MTZ_cytokines <- 
+  get_baseline_cytokines(
+    mae = mae, PID = baseline$USUBJID, target_visits = 2
+    )$data
+
+
+block <- "pre-MTZ cytokines"
+
+var_desc <- 
+  bind_rows(
+    var_desc, 
+    tibble(var = colnames(pre_MTZ_cytokines), desc = colnames(pre_MTZ_cytokines), block = block)
+  )
+
+pre_MTZ_cytokines <- 
+  pre_MTZ_cytokines |> 
+  rownames_to_column("USUBJID") |> 
+  mutate(USUBJID = USUBJID |> str_remove("_[0-9]+$"))
+  
+```
+
+#### Post-MTZ
+
+```{r}
+
+post_MTZ_cat <- 
+  get_assay_long_format(mae, "mb_categories")  |>
+  filter(AVISITN == 1) |> 
+  select(USUBJID, value) |> 
+  dplyr::rename(post_MTZ_cat = value) 
+
+
+block <- "post-MTZ microbiota category"
+
+var_desc <- 
+  bind_rows(
+    var_desc, 
+    tibble(var = "post_MTZ_cat", desc = "post-MTZ microbiota category", block = block)
+  )
+  
+```
+
+
+```{r}
+
+post_MTZ_vag_env <- 
+  get_prev_visit_environment(
+    mae = mae, PID = baseline$USUBJID, target_visits = 2
+  )$data
+
+
+block <- "post-MTZ Vag. env."
+
+var_desc <- 
+  bind_rows(
+    var_desc, 
+    tibble(var = "α diversity (r)", desc = "α diversity (residuals)", block = block),
+    tibble(var = "pH (r)", desc = "pH (residuals)", block = block),
+    tibble(var = "log10(bact. load)", desc = "log10(bact. load)", block = block)
+  )
+
+post_MTZ_vag_env <- 
+  post_MTZ_vag_env |> 
+  rownames_to_column("USUBJID") |> 
+  mutate(USUBJID = USUBJID |> str_remove("_[0-9]+$"))
+
+```
+
+
+#### Behavior
+
+```{r}
+
+behavior <- 
+  mae@colData |> 
+  as.data.frame() |>
+  as_tibble() |>
+  filter(ARM %in% arms, AVISITN > 1, PIPV) |>
+  select(
+    USUBJID, AVISITN,
+    N_SINCE_LPIPV_UNPROT_SEX, N_SINCE_LPIPV_PROT_SEX, N_NEW_PARTNERS
+  ) |> 
+  arrange(USUBJID, AVISITN) |>
+  distinct() |> 
+  group_by(USUBJID) |>
+  mutate(
+    any_unprot_sex = ifelse(cumsum(N_SINCE_LPIPV_UNPROT_SEX > 0) > 0, "No sex", "1+ sex") |> factor(levels = c("No sex", "1+ sex")),
+    any_prot_sex = ifelse(cumsum(N_SINCE_LPIPV_PROT_SEX > 0) > 0, "No sex", "1+ sex") |> factor(levels = c("No sex", "1+ sex")),
+    total_new_partners = cumsum(N_NEW_PARTNERS)
+  ) |> 
+  ungroup() |> 
+  filter(AVISITN %in% target_visits) |>
+  mutate(week = ifelse(AVISITN == 4, 12, 24)) |>
+  select(USUBJID, week, starts_with("any_"), total_new_partners)
+  
+
+
+block <- "Sexual behavior"
+
+var_desc <- 
+  bind_rows(
+    var_desc, 
+    tibble(var = "any_unprot_sex", desc = "Self-reported sex without condom", block = block),
+    tibble(var = "any_prot_sex", desc = "Self-reported sex with condom", block = block),
+    tibble(var = "total_new_partners", desc = "N new partners", block = block)
+  )
+  
+
+```
+
+#### Perturbations
+
+
+```{r}
+
+perturbations <- 
+  mae@colData |> 
+  as.data.frame() |>
+  as_tibble() |>
+  filter(ARM %in% arms, AVISITN > 1, PIPV) |>
+  select(
+    USUBJID, AVISITN,
+    N_SINCE_LPIPV_DOUCH, N_BLEED_LPIPV
+  ) |> 
+  arrange(USUBJID, AVISITN) |>
+  distinct() |> 
+  group_by(USUBJID) |>
+  mutate(
+    n_douching = N_SINCE_LPIPV_DOUCH,
+    n_bleeding = N_BLEED_LPIPV
+  ) |> 
+  ungroup() |> 
+  filter(AVISITN %in% target_visits) |>
+  mutate(week = ifelse(AVISITN == 4, 12, 24)) |>
+  select(USUBJID, week, n_douching, n_bleeding)
+  
+
+
+block <- "Perturbations"
+
+var_desc <- 
+  bind_rows(
+    var_desc, 
+    tibble(var = "n_douching", desc = "Nb of days with self-reported douching since last visit", block = block),
+    tibble(var = "n_bleeding", desc = "Nb of days with self-reported bleeding since last visit", block = block)
+  )
+  
+
+```
+
+
+
+
+
+### Data for table
+
+```{r}
+
+table_data <- 
+  Y |> 
+  left_join(baseline, by = join_by(USUBJID)) |> 
+  left_join(pre_MTZ_vag_env, by = join_by(USUBJID)) |>
+  left_join(pre_MTZ_mb, by = join_by(USUBJID)) |>
+  left_join(pre_MTZ_cytokines, by = join_by(USUBJID)) |>
+  left_join(post_MTZ_cat, by = join_by(USUBJID)) |>
+  left_join(post_MTZ_vag_env, by = join_by(USUBJID)) |>
+  left_join(behavior, by = join_by(USUBJID, week)) |>
+  left_join(perturbations, by = join_by(USUBJID, week)) |>
+  arrange(ARM, USUBJID) |> 
+  mutate(
+    outcome_num = outcome,
+    outcome = 
+      case_when(
+        (outcome_var == "≥ 50% L.c.") & (outcome == 1) ~ "≥ 50% L.c.",
+        (outcome_var == "≥ 50% L.c.") & (outcome == 0) ~ "< 50% L.c.",
+        (outcome_var == "rBV") & (outcome == 1) ~ "rBV",
+        (outcome_var == "rBV") & (outcome == 0) ~ "No rBV",
+      )
+  )
+  
+
+```
+
+### Tables
+
+```{r}
+library(gtsummary)
+```
+
+
+```{r}
+
+gt_rBV_w12 <- make_stratified_table(table_data = table_data, target_week = 12, outcome_of_interest = "rBV", var_desc = var_desc)
+gt_rBV_w24 <- make_stratified_table(table_data = table_data, target_week = 24, outcome_of_interest = "rBV", var_desc = var_desc)
+gt_Lcr_w12 <- make_stratified_table(table_data = table_data, target_week = 12, outcome_of_interest = "≥ 50% L.c.", var_desc = var_desc)
+gt_Lcr_w24 <- make_stratified_table(table_data = table_data, target_week = 24, outcome_of_interest = "≥ 50% L.c.", var_desc = var_desc)
+
+```
+
+```{r}
+gt_rBV_w12
+gt_rBV_w24
+gt_Lcr_w12
+gt_Lcr_w24
+```
+
+
+### Exports
+
+```{r}
+# library(openxlsx)
+# wb <- createWorkbook()
+# addWorksheet(wb, "rBV_week12", gridLines = F)
+# gt_rBV_w12 |> gt_to_xlsx(wb, "rBV_week12")
+# addWorksheet(wb, "rBV_week24", gridLines = F)
+# gt_rBV_w24 |> gt_to_xlsx(wb, "rBV_week24")
+# addWorksheet(wb, "Lc_week12", gridLines = F)
+# gt_Lcr_w12 |> gt_to_xlsx(wb, "Lc_week12")
+# addWorksheet(wb, "Lc_week24", gridLines = F)
+# gt_Lcr_w24 |> gt_to_xlsx(wb, "Lc_week24")
+# saveWorkbook(wb, str_c(fig_out_dir(), "spreadsheets/Predictors_by_arm_and_outcomes.xlsx"))
+
+```
+
+```{r}
+
+gtsave(
+  gt_rBV_w12, 
+  str_c(fig_out_dir(),
+        "spreadsheets/Predictors_by_arm_and_rBV_by_week12.html")
+)
+
+gtsave(
+  gt_rBV_w24, 
+  str_c(fig_out_dir(),
+        "spreadsheets/Predictors_by_arm_and_rBV_by_week24.html")
+)
+
+
+gtsave(
+  gt_Lcr_w12, 
+  str_c(fig_out_dir(),
+        "spreadsheets/Predictors_by_arm_and_Lc_at_week12.html")
+)
+
+
+gtsave(
+  gt_Lcr_w24, 
+  str_c(fig_out_dir(),
+        "spreadsheets/Predictors_by_arm_and_Lc_at_week24.html")
+)
+
+```
+
+
+
+
+```{r}
+#| eval: false
+gtsave(
+  gt_rBV_w12, 
+  str_c(fig_out_dir(),
+        "spreadsheets/Predictors_by_arm_and_rBV_by_week12.pdf")
+)
+
+gtsave(
+  gt_rBV_w12, 
+  str_c(fig_out_dir(),
+        "spreadsheets/Predictors_by_arm_and_rBV_by_week12.docx")
+)
+
+```
+
+
+
+
+
+
 
 
 

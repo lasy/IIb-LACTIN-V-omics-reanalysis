@@ -1,0 +1,37 @@
+"0",""
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S4A.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S4A
+"
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S4B.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S4B
+"
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S4C.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S4C
+"
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S4D.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S4D
+"
+"0","load(str_c(fig_out_dir(), ""supplementary_ggplots/S4EG.RData""), verbose = TRUE)"
+"1","Loading objects:
+"
+"1","  "
+"1","g_S4E
+"
+"1","  "
+"1","g_S4F
+"
+"1","  "
+"1","g_S4G
+"

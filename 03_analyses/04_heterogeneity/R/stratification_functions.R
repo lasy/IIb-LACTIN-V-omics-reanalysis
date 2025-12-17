@@ -140,7 +140,7 @@ plot_stratified_risks <- function(AYV, outcomes, strata, min_n_in_each_arm = 5){
     mutate(
       outcome_label = 
         outcome |> 
-        str_replace("Lc_", "≥50% L. crisp. at ") |> 
+        str_replace("Lc_", "≥50% *L. crisp.* at ") |> 
         str_replace("rBV_", "any rBV by ") |> 
         str_replace("week_", "week ") 
     )
@@ -172,11 +172,10 @@ plot_stratified_risks <- function(AYV, outcomes, strata, min_n_in_each_arm = 5){
     scale_color_manual("Arm", values = get_arm_colors(), guide = guide_legend(direction  = "vertical")) +
     guides(size = "none", shape = "none") +
     xlab("") + ylab("Rates") +
-    # labs(
-    #   caption = "95% CI for the rates are computed using Wilson's formula."
-    # ) +
     theme(
       strip.text.y = element_text(angle = 0, hjust = 0),
+      strip.text.x = ggtext::element_markdown(),
+      axis.text.x = ggtext::element_markdown(),
       legend.position = "right"
     )
   g_r
@@ -248,7 +247,7 @@ plot_stratified_differences <- function(AYV, outcomes, strata, min_n_in_each_arm
     mutate(
       outcome_label = 
         outcome |> 
-        str_replace("Lc_", "≥50% L. crisp. at ") |> 
+        str_replace("Lc_", "≥50% *L. crisp.* at ") |> 
         str_replace("rBV_", "any rBV by ") |> 
         str_replace("week_", "week ") 
     )
@@ -279,7 +278,9 @@ plot_stratified_differences <- function(AYV, outcomes, strata, min_n_in_each_arm
     #   caption = "95%CI computed using Wilson score method for differences."
     # ) +
     theme(
-      legend.position = "right"
+      legend.position = "right",
+      strip.text.x = ggtext::element_markdown(),
+      axis.text.x = ggtext::element_markdown()
     )
   
   g_rd

@@ -1,0 +1,27 @@
+{
+    "id": "A734E7FF",
+    "path": "~/Documents/Work/Academia/Research/Papers/10. LACTIN-V/gates_lactinv local copy/04_assembling_supplementary_figures/export_mae_to_csv.R",
+    "project_path": "export_mae_to_csv.R",
+    "type": "r_source",
+    "hash": "710540683",
+    "contents": "",
+    "dirty": false,
+    "created": 1765987531124.0,
+    "source_on_save": true,
+    "relative_order": 2,
+    "properties": {
+        "tempName": "Untitled1",
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "23,0",
+        "scrollLine": "4"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1765987555,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1765987555167,
+    "read_only": false,
+    "read_only_alternatives": []
+}

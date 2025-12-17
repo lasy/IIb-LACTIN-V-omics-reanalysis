@@ -193,11 +193,44 @@ corrplot::corrplot(cytok_corr, method = "color", diag = FALSE, addCoef.col = "bl
   
 ```
 
+```{r}
+#| fig-height: 9
+#| fig-width: 9
+#| fig-cap: "Correlation matrix of cytokine log10-transformed concentrations"
+
+g <- 
+  cytok_corr  |> 
+  as.data.frame() |>
+  rownames_to_column("cytokine_1") |>
+  mutate(cytokine_1 = cytokine_1 |> fct_inorder()) |> 
+  pivot_longer(
+    cols = -cytokine_1,
+    names_to = "cytokine_2",
+    values_to = "cor"
+  ) |>
+  mutate(cytokine_2 = cytokine_2 |> fct_inorder()) |> 
+  filter(cor != 1) |>
+  ggplot() +
+  aes(x = cytokine_1, y = cytokine_2, fill = cor) +
+  geom_tile() +
+  geom_text(aes(label = round(cor, 2)), size = 3) +
+  scale_fill_distiller(
+    "Pearson\ncorrelation",
+    type = "div", palette = "RdBu", limits = c(-1, 1), direction = 1
+    ) +
+  xlab("") + ylab("") 
+
+g
+  
+```
+
+
 
 ```{r}
-#| eval: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S4B.pdf"), width = 9, height = 9, device = cairo_pdf)
+g_S4B <- g
+save(g_S4B, file = str_c(fig_out_dir(), "supplementary_ggplots/S4B.Rdata"))
+# ggsave(g, filename = str_c(fig_out_dir(), "S4B.pdf"), width = 9, height = 9, device = cairo_pdf)
 
 ```
 
@@ -848,12 +881,13 @@ cytok <- cytok |> left_join(fraction_at_LLOQ, by = join_by(cytokine))
 
 
 ```{r}
+#| cache: false
 #| fig-height: 5
 
 g <- 
 ggplot(cytok, aes(x = log10_concentration, fill = included)) +
   geom_histogram(bins = 50) +
-  facet_wrap(cytokine ~ ., nrow = 3) +
+  facet_wrap(cytokine ~ ., nrow = 4) +
   theme(legend.position = "bottom") +
   labs(
     x = "log10(imputed concentrations)",
@@ -874,8 +908,12 @@ ggplot(cytok, aes(x = transformed_concentration)) +
 
 
 ```{r}
+#| cache: false
 
-ggsave(g, filename = str_c(fig_out_dir(), "S4A.pdf"), width = 10, height = 6, device = cairo_pdf)
+g_S4A <- g
+save(g_S4A, file = str_c(fig_out_dir(), "supplementary_ggplots/S4A.Rdata"))
+
+# ggsave(g, filename = str_c(fig_out_dir(), "S4A.pdf"), width = 10, height = 6, device = cairo_pdf)
 
 ```
 

@@ -1,0 +1,478 @@
+---
+title: "Assembling supplementary figures and tables" 
+author: Laura Symul
+format: 
+   html:
+     page-layout: full
+     code-fold: true
+     toc: true
+     toc-location: left
+     toc-depth: 5
+     embed-resources: true
+execute:
+  cache: true  # true | refresh
+knitr:
+  opts_chunk:
+    out.width: "100%"
+editor: source
+---
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+rm(list = ls())
+
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(gt)
+library(ggtext)
+
+
+```
+
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+tmp <- fs::dir_map("../R/", source)
+
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| cache: false
+
+theme_set(theme_publication())
+
+```
+
+
+```{r}
+#| warning: false
+
+# We load the MAE object
+mae <- load_latest_mae(dir = str_c(data_dir(), "03_augmented_mae/")) 
+clin <- MultiAssayExperiment::colData(mae) |> as.data.frame() |> as_tibble()
+
+```
+
+## Supplementary Figure 1
+
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S1A.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S1B.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S1C.RData"), verbose = TRUE)
+
+```
+
+```{r}
+#| fig-width: 18
+#| fig-height: 8
+
+g_S1B[[1]] <- g_S1B[[1]] + labs(tag = "B")
+g_S1C[[1]] <- g_S1C[[1]] + labs(tag = "C")
+
+fig_S1 <- 
+  free(g_S1A + labs(tag = "A")) + # + theme(legend.position = "bottom")
+  g_S1B +
+  g_S1C + 
+  plot_layout(
+    widths = c(1, 2.5),
+    design = "
+    AB
+    AC
+    "
+    )
+fig_S1
+  
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S1, filename = str_c(fig_out_dir(), "FigS1.pdf"), 
+  width = 6.5, height = 3, scale = 3, device = cairo_pdf
+  )
+
+```
+
+
+
+## Supplementary Figure 2
+
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S2A.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S2B.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S2C.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S2D.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S2E.RData"), verbose = TRUE)
+
+
+```
+
+```{r}
+#| fig-width: 13
+#| fig-height: 16
+
+
+fig_S2 <- 
+  g_S2A + g_S2B +
+  free(g_S2C + scale_x_continuous("Relative abundance", labels = scales::percent)) +
+  g_S2D +
+  g_S2E +
+  
+  plot_layout(
+    heights = c(2,1,2,1.5),
+    design = "
+    AB
+    CC
+    DD
+    EE
+    "
+    ) +
+  plot_annotation(tag_levels = "A")
+fig_S2
+  
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S2, filename = str_c(fig_out_dir(), "FigS2.pdf"), 
+  width = 6.5, height = 8, scale = 2, device = cairo_pdf
+  )
+
+```
+
+## Supplementary Figure 4
+
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S4A.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S4B.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S4C.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S4D.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S4EG.RData"), verbose = TRUE)
+
+```
+
+```{r}
+#| fig-width: 13
+#| fig-height: 15
+
+
+fig_S4 <- 
+  g_S4A + labs(caption = "") +  # A
+  g_S4B + coord_fixed() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # B
+  g_S4C + theme(legend.position = "top") +
+  g_S4D + theme(legend.position = "top") +
+  g_S4E + g_S4F + g_S4G +
+  plot_layout(
+    heights = c(2,1,1.5),
+    design = "
+    AABBB
+    CDDDD
+    EFFGG
+    "
+    ) +
+  plot_annotation(tag_levels = "A")
+fig_S4
+  
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S4, filename = str_c(fig_out_dir(), "FigS4.pdf"), 
+  width = 6.5, height = 8, scale = 2, device = cairo_pdf
+  )
+
+```
+
+
+
+## Supplementary Figure 5
+
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S5A.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S5B.RData"), verbose = TRUE)
+
+
+```
+
+```{r}
+#| fig-width: 13
+#| fig-height: 7
+
+fig_S5 <- g_S5A + g_S5B +
+  plot_layout(ncol = 1) +
+  plot_annotation(tag_levels = "A")
+fig_S5
+  
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S5, filename = str_c(fig_out_dir(), "FigS5.pdf"), 
+  width = 5, height = 3.5, scale = 2, device = cairo_pdf
+  )
+
+```
+
+
+
+
+## Supplementary Figure 6
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S6A.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S6B.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S6C.RData"), verbose = TRUE)
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 12
+
+
+fig_S6 <- 
+  g_6A + labs(tag = "A") + 
+  g_6B + 
+  g_6C +
+  plot_layout(
+    guides = "collect", nrow = 3, heights = c(1.1,1,1)
+  ) 
+
+fig_S6
+
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S6, filename = str_c(fig_out_dir(), "FigS6.pdf"), 
+  width = 6.5, height = 6.5, scale = 2, device = cairo_pdf
+  )
+
+```
+
+
+
+## Supplementary Figure 7
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S7A.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S7B.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S7C.RData"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/S7D.RData"), verbose = TRUE)
+
+
+```
+
+
+```{r}
+#| fig-width: 12
+#| fig-height: 16
+
+
+fig_S7 <- 
+  free(g_S7A) +
+  g_S7B + 
+  g_S7C + ylab("") + theme(axis.text.y = element_blank()) +
+  g_S7D + ylab("") + theme(axis.text.y = element_blank()) +
+  plot_layout(
+    heights = c(5,1),
+    design = "
+    AAA
+    BCD
+    "
+  ) +
+  plot_annotation(tag_levels = "A")
+
+fig_S7
+
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S7, filename = str_c(fig_out_dir(), "FigS7.pdf"), 
+  width = 6.5, height = 8, scale = 2.5, device = cairo_pdf
+  )
+
+```
+
+## Supplementary Figure 8
+
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S8.RData"), verbose = TRUE)
+
+
+```
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 12
+
+fig_S8 <- g_S8
+fig_S8
+
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S8, filename = str_c(fig_out_dir(), "FigS8.pdf"), 
+  width = 6.5, height = 6, scale = 2, device = cairo_pdf
+  )
+
+```
+
+
+## Supplementary Figure 9
+
+
+```{r}
+
+load(str_c(fig_out_dir(), "supplementary_ggplots/S9.RData"), verbose = TRUE)
+
+
+```
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 12
+
+fig_S9 <- g_S9
+fig_S9
+
+```
+
+```{r}
+
+ggsave(
+  plot = fig_S9, filename = str_c(fig_out_dir(), "FigS9.pdf"), 
+  width = 6.5, height = 7, scale = 2, device = cairo_pdf
+  )
+
+```
+
+
+# Data exports
+
+```{r}
+#| eval: false
+source("../03_analyses/01_primary_and_secondary_endpoints/R/compute_BC_between_visits.R")
+
+data_for_Laurel <- 
+  mae@colData |> 
+  as_tibble() |> 
+  filter(!is.na(ARM)) |> 
+  select(UID = Barcode, USUBJID, SITENAME, ARM, AVISITN, DAY, BV, LOAD, LCRISP, CTV05, LACTO) |> 
+  left_join(
+    compute_BC_between_successive_visits(mae, assayname = "ASV_16S_filtered_p", v = c(0:4,7))  |> 
+      select(USUBJID, UID = Barcode_v1, BC_to_next_visit = BC, next_visit_AVISITN = v2),
+    by = join_by(UID, USUBJID)
+  ) |> 
+  left_join(
+    get_assay_wide_format(mae, "c_topics_16S_8", add_colData = FALSE) |> 
+      dplyr::rename(UID = Barcode) |> 
+      mutate(
+        topic_prop = 
+          assay |> 
+          set_colnames(
+            mae[["c_topics_16S_8"]] |> 
+              rowData() |> 
+              as.data.frame() |> 
+              pull(topic_label))
+        ) |> 
+      dplyr::select(UID, topic_prop),
+    by = join_by(UID)
+  ) |> 
+  filter(!is.na(topic_prop$`L. crispatus`)) |> 
+  arrange(USUBJID, AVISITN) |> 
+  unnest(topic_prop)
+
+write_csv(
+  data_for_Laurel, 
+  file = 
+    str_c(
+      data_dir(), "06_exports/", 
+      today() |> str_remove_all("-"), "_data_for_Laurel.csv"
+      )
+  )
+
+```
+
+
+
+
+
+
+```{r}
+
+zenodo_data_dir <- str_c(data_dir(), "06_exports/Zenodo/")
+fs::dir_create(zenodo_data_dir)
+
+write_rds(
+  mae, 
+  file = 
+    str_c(
+      zenodo_data_dir, "US_LactinV_multiomics_mae_", 
+      today() |> str_remove_all("-"),
+      ".rds"
+    )
+)
+
+
+
+```
+
+```{r}
+
+export_mae_to_csv(
+  mae, # mae[,,c(1,10, 24)], 
+  dir = 
+    str_c(
+      zenodo_data_dir, "US_LactinV_multiomics_mae_", 
+      today() |> str_remove_all("-"),
+      "_as_csv_files/"
+    )
+)
+
+```
+
+
+
+# Session Info
+
+<button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" >Click this text for obtaining the R session information</button><div id="collapseOne" class="accordion-collapse collapse"><div>
+
+```{r}
+sessionInfo()
+```
+
+</div></div>

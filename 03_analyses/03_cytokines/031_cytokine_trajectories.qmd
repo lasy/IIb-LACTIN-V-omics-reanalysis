@@ -597,79 +597,7 @@ save(g_selection, file = str_c(data_dir(), "05_figures_tables/fig_3a.Rdata"))
 
 #### Effects of intervention at week 24
 
-```{r}
-
-res <- 
-  map(
-    cytokine_names,
-    effects_of_intervention,
-    cytokines_long = cytokines_long
-  ) |> 
-  bind_rows()
-
-```
-
-```{r}
-
-res |> select(cytokine, ends_with("pval")) |> distinct() |> 
-  gt(caption = "Model validity tests from DHARMa simulations") |> 
-  fmt_number(
-    columns = everything(),
-    decimals = 3
-  ) 
-
-```
-
-Caution! Model assumptions are not met for most cytokines (likely because of the LLOQ and ULOQ imputed values). 
-
-We try again using ranks instead of the original values.
-
-```{r}
-
-set.seed(1) # rank uses random numbers to break ties
-res <- 
-  map(
-    cytokine_names,
-    effects_of_intervention,
-    cytokines_long = cytokines_long,
-    use_ranks = TRUE
-  ) |> 
-  bind_rows()
-
-```
-
-```{r}
-
-res |> select(cytokine, ends_with("pval")) |> distinct() |> 
-  gt(caption = "Model validity tests from DHARMa simulations") |> 
-  fmt_number(
-    columns = everything(),
-    decimals = 3
-  ) 
-
-```
-Not much better...
-
-```{r}
-#| fig-width: 8
-#| fig-height: 5
-
-res |> filter(visit %in% c("Week 12", "Week 24")) |> 
-  ggplot() +
-  aes(x = visit, y = estimate) +
-  facet_grid(. ~ cytokine) +
-  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
-  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
-  geom_point(size = 2) +
-  xlab("Visit") +
-  ylab("Estimated difference in percentile,\nadjusted for random participants effects\nand associated 95% CI.") +
-  labs(caption = "Linear mixed model fitted on ranks.") +
-  theme(
-    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
-  )
-
-```
-Non-parametric test instead.
+Non-parametric test:
 
 ```{r}
 
@@ -686,21 +614,42 @@ res <-
 
 ```
 
+t-test:
+
+```{r}
+
+t_test_res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention_student,
+    cytokines_to_preMTZ = cytokines_to_preMTZ
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    adj_p_value = p.adjust(p_value, method = "BH")
+  )
+
+```
+
+
 
 
 ```{r}
 #| fig-width: 8
 #| fig-height: 5
 
-res |> 
+bind_rows(
+  res |> mutate(test = "Wilcoxon signed rank test"),
+  t_test_res |> mutate(test = "Student t-test")
+  ) |> 
   ggplot() +
-  aes(x = cytokine, y = estimate) +
+  aes(x = cytokine, y = estimate, col = test) +
   geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
-  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
-  geom_point(size = 2) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper), position = position_dodge(width = 0.3)) +
+  geom_point(size = 2, position = position_dodge(width = 0.3)) +
   xlab("") +
   ylab("Estimated difference in location (Lactin-V - Placebo)\nand associated 95% CI.") +
-  labs(caption = "Wilcoxon signed rank test on the difference between log10(conc.) at baseline (pre-MTZ) and Week 24 visit") +
+  labs(caption = "Test on the difference between log10(conc.) at baseline (pre-MTZ) and Week 24 visit") +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1)
   )
@@ -718,7 +667,6 @@ res |>
     decimals = 3
   ) 
   
-
 ```
 
 
@@ -955,8 +903,9 @@ g
 
 ```{r}
 #| cache: false
-
-ggsave(g, filename = str_c(fig_out_dir(), "S4D.pdf"), width = 10, height = 4, device = cairo_pdf)
+g_S4D <- g
+save(g_S4D, file = str_c(fig_out_dir(), "supplementary_ggplots/S4D.Rdata"))
+# ggsave(g, filename = str_c(fig_out_dir(), "S4D.pdf"), width = 10, height = 4, device = cairo_pdf)
 
 ```
 
@@ -1086,79 +1035,7 @@ save(g_selection, file = str_c(data_dir(), "05_figures_tables/fig_3a_PC1_subtrac
 
 #### Effects of intervention at week 24
 
-```{r}
-
-res <- 
-  map(
-    cytokine_names,
-    effects_of_intervention,
-    cytokines_long = cytokines_long
-  ) |> 
-  bind_rows()
-
-```
-
-```{r}
-
-res |> select(cytokine, ends_with("pval")) |> distinct() |> 
-  gt(caption = "Model validity tests from DHARMa simulations") |> 
-  fmt_number(
-    columns = everything(),
-    decimals = 3
-  ) 
-
-```
-
-Caution! Model assumptions are not met for most cytokines (likely because of the LLOQ and ULOQ imputed values). 
-
-We try again using ranks instead of the original values.
-
-```{r}
-
-set.seed(1) # rank uses random numbers to break ties
-res <- 
-  map(
-    cytokine_names,
-    effects_of_intervention,
-    cytokines_long = cytokines_long,
-    use_ranks = TRUE
-  ) |> 
-  bind_rows()
-
-```
-
-```{r}
-
-res |> select(cytokine, ends_with("pval")) |> distinct() |> 
-  gt(caption = "Model validity tests from DHARMa simulations") |> 
-  fmt_number(
-    columns = everything(),
-    decimals = 3
-  ) 
-
-```
-Not much better...
-
-```{r}
-#| fig-width: 8
-#| fig-height: 5
-
-res |> filter(visit %in% c("Week 12", "Week 24")) |> 
-  ggplot() +
-  aes(x = visit, y = estimate) +
-  facet_grid(. ~ cytokine) +
-  geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
-  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
-  geom_point(size = 2) +
-  xlab("Visit") +
-  ylab("Estimated difference in percentile,\nadjusted for random participants effects\nand associated 95% CI.") +
-  labs(caption = "Linear mixed model fitted on ranks.") +
-  theme(
-    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
-  )
-
-```
-Non-parametric test instead.
+Non-parametric test:
 
 ```{r}
 
@@ -1175,39 +1052,101 @@ res <-
 
 ```
 
+t-test:
+
+```{r}
+
+t_test_res <- 
+  map(
+    cytokine_names,
+    effects_of_intervention_student,
+    cytokines_to_preMTZ = cytokines_to_preMTZ
+  ) |> 
+  bind_rows() |> 
+  mutate(
+    adj_p_value = p.adjust(p_value, method = "BH")
+  )
+
+```
+
+
 
 
 ```{r}
 #| fig-width: 8
 #| fig-height: 5
 
-res |> 
+bind_rows(
+  res |> mutate(test = "Wilcoxon signed rank test"),
+  t_test_res |> mutate(test = "Student t-test")
+  ) |> 
   ggplot() +
-  aes(x = cytokine, y = estimate) +
+  aes(x = cytokine, y = estimate, col = test) +
   geom_hline(yintercept = 0, col = "gray", linewidth = 1) +
-  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper)) +
-  geom_point(size = 2) +
+  geom_linerange(aes(ymin = CI_lower, ymax = CI_upper), position = position_dodge(width = 0.3)) +
+  geom_point(size = 2, position = position_dodge(width = 0.3)) +
   xlab("") +
   ylab("Estimated difference in location (Lactin-V - Placebo)\nand associated 95% CI.") +
-  labs(caption = "Wilcoxon signed rank test on the difference between PC1-subtracted z-log10(conc.) at baseline (pre-MTZ) and Week 24 visit") +
+  labs(caption = "Test on the difference between log10(conc.) at baseline (pre-MTZ) and Week 24 visit") +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1)
   )
 
 ```
+
+
 ```{r}
 
 res |> 
   select(-p_value) |> 
-  gt(caption = "Wilcoxon signed rank test on the difference between PC1-subtracted z-log10(conc.) at baseline (pre-MTZ) and Week 24 visit") |> 
+  gt(caption = "Wilcoxon signed rank sum test on the difference between log10(conc.) at baseline (pre-MTZ) and Week 24 visit") |> 
   fmt_number(
     columns = -c("W"),
     decimals = 3
+  ) 
+  
+```
+
+
+
+```{r}
+#| fig-height: 6
+#| fig-width: 5
+
+w_test_res <- 
+  res |> 
+  filter(cytokine %in% selected_cytokines) |> 
+  mutate(
+    Visit = "Week 24" |> factor(),
+    xmin = 1, xmax = 2,
+    group1 = "LACTIN-V", group2 = "Placebo",
+    label = case_when(
+      adj_p_value < 0.001 ~ "***",
+      adj_p_value < 0.01 ~ "**",
+      adj_p_value < 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  ) |> 
+  left_join(
+    g_selection@data |> 
+      filter(Visit == "Week 24") |> 
+      group_by(cytokine) |>
+      summarise(y.position = max(value) + 0.5)
   )
+
+g_selection <- 
+  g_selection +
+  ggpubr::stat_pvalue_manual(data = w_test_res)
 
 ```
 
 
+```{r}
+
+
+save(g_selection, w_test_res, file = str_c(data_dir(), "05_figures_tables/fig_3a_PC1_subtracted_all.Rdata"))
+
+```
 
 ### Transformed concentrations (excluding samples with many OOR features)
 

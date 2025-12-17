@@ -36,7 +36,7 @@ get_mtb_lX_for_plot <- function(res, xaxis, yaxis, samples_color = NULL){
 plot_mtb_biplot <- function(res, xaxis, yaxis, scale_axes = "eig", 
                             samples_color, sample_color_scale = list(name = "", values = c(1:3)), 
                             block_color_scale = list(name = "", values = block_colors, breaks = block_names), 
-                            loading_scaling = 20,
+                            loading_scaling = 20, var_text_size = 3,
                             VIP = TRUE, boot){
   
   res_loadings <- get_mtb_loadings_for_plot(res = res, xaxis = xaxis, yaxis = yaxis, VIP = VIP, boot = boot) |> 
@@ -82,10 +82,13 @@ plot_mtb_biplot <- function(res, xaxis, yaxis, scale_axes = "eig",
       aes(xend = 0, yend = 0, col = block),
       arrow = arrow(ends = "first", type = "closed", length = unit(10,"pt"))
     ) +
-    geom_label_repel(
+    geom_text_repel(
       data = res_loadings,
       aes(label = variable, col = block), 
-      min.segment.length = 1, size = 3
+      min.segment.length = 0.5, size = var_text_size,
+      position = ggpp::position_nudge_center(0.4, 0.8, 0, 0, direction = "split"),
+      segment.linetype = 1, segment.color = "gray70",
+      box.padding = 0.4, max.overlaps = Inf
     )  +
     scale_color_manual(block_color_scale$name, values = block_color_scale$values, breaks = block_color_scale$breaks) +
     guides(col = "none")

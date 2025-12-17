@@ -13,12 +13,3 @@ janitor
 gt
 ggthemes
 phyloseq
-matrixStats
-MatrixGenerics
-BiocGenerics
-S4Vectors
-IRanges
-GenomeInfoDb
-GenomicRanges
-Biobase
-SummarizedExperiment

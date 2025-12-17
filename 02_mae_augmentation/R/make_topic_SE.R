@@ -32,6 +32,7 @@ make_topic_SE <- function(mae, assay_name, lda_model) {
             taxon |> 
             str_replace("Prevotella", "P.") |> 
             str_replace("Gardnerella swidsinskii_leopoldii", "G. s./l.") |>
+            str_replace("Gardnerella \\(ASV G1\\)", "Gardnerella") |>
             str_replace("Candidatus Lachnocurva vaginae", "Ca. L. v.") |>
             str_c(" topic")
         ) |> fct_inorder()

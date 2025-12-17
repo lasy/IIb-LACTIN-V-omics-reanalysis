@@ -196,9 +196,10 @@ rv_by_visits |> gt()
 
 
 g <- 
-rv_by_visits |> 
+  rv_by_visits |>
+  mutate(rv_obs = rv$obs) |> 
   ggplot(aes(x = visit, y = RV, size = -log10(adj_pval), col = adj_pval < 0.05)) +
-  geom_hline(aes(yintercept = rv$obs), linetype = 2) +
+  geom_hline(aes(yintercept = rv_obs |> unique()), linetype = 2) +
   geom_point() +
   expand_limits(y = 0, size = 0) +
   xlab("") +
@@ -213,8 +214,9 @@ g
 
 ```{r}
 #| cache: false
-
-ggsave(g, filename = str_c(fig_out_dir(), "S4C.pdf"), width = 4, height = 4, device = cairo_pdf)
+g_S4C <- g
+save(g_S4C, file = str_c(fig_out_dir(), "supplementary_ggplots/S4C.Rdata"))
+# ggsave(g, filename = str_c(fig_out_dir(), "S4C.pdf"), width = 4, height = 4, device = cairo_pdf)
 
 ```
 
@@ -1012,6 +1014,64 @@ cors <-
 
 ```
 
+
+
+```{r}
+#| eval: false
+tibble(
+  label = c("AB",  "A\nB",  expression(italic("A")~"B")) # "A*B*","A<br>B",
+) |> 
+  mutate(x = row_number(), y = 1) |> 
+  ggplot() +
+  aes(x = x, y = y, label = label) +
+  # geom_text(parse = TRUE) +
+  ggrepel::geom_text_repel(parse = TRUE)
+
+
+```
+
+```{r}
+
+tibble(
+  x = 1:5,
+  y = 1:5,
+  label = c("italic('Genus species')", 
+            "'Normal text'",
+            "italic('Italic text')",
+            "paste('Mix ', italic('italic'), ' and normal')",
+            "italic('All italic')")
+) |> 
+  ggplot() +
+  aes(x, y, label = label) +
+  geom_point() +
+  geom_text_repel(aes(label = label), 
+                  parse = TRUE,
+                  size = 4) +
+  theme_minimal()
+```
+
+
+```{r}
+
+
+cors <- 
+  cors |> 
+  mutate(
+    feature_print = 
+      case_when(
+        str_detect(feature, "^L\\. .*") ~ str_c("italic('",feature,"')"),
+        str_detect(feature, "BVAB1") ~ "paste(italic('Ca.'), ' L. v. (BVAB1) topic')",
+        str_detect(feature, "Other") ~ "paste('Other ',italic('L.'))",
+        str_detect(feature, "topic$") ~ str_c("paste(italic('",feature |> str_remove(" topic"),"'), ' topic')"),
+        TRUE ~ str_c("'",feature,"'")
+      )
+  )
+
+```
+
+
+
+
 Correlation circles
 
 ```{r}
@@ -1027,7 +1087,8 @@ g_cor_circle_L1_12 <-
       arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
   ) +
   geom_text_repel(
-    aes(label = feature), show.legend = FALSE, max.overlaps = Inf,
+    aes(label = feature_print), parse = TRUE,
+    show.legend = FALSE, max.overlaps = Inf,
     position = ggpp::position_nudge_center(0.1, 0.1, 0, 0),
     segment.linetype = 1, segment.color = "gray70", min.segment.length = 0.8,
     box.padding = 0.3
@@ -1048,7 +1109,8 @@ g_cor_circle_L1_34 <-
       arrow(ends = "first", type = "closed", angle = 20, length = unit(0.1, "inches"))
   ) +
   geom_text_repel(
-    aes(label = feature), show.legend = FALSE,
+    aes(label = feature_print), parse = TRUE,
+    show.legend = FALSE,
     position = ggpp::position_nudge_center(0.1, 0.1, 0, 0),
     segment.linetype = 1, segment.color = "gray70", min.segment.length = 0.8,
     box.padding = 0.3, max.overlaps = 3
@@ -1723,10 +1785,14 @@ g
 ```
 
 
-
 ```{r}
 
-ggsave(g, filename = str_c(fig_out_dir(), "S4EG.pdf"), width = 14, height = 5, device = cairo_pdf)
+g_S4E <- g[[1]]
+g_S4F <- g[[2]]
+g_S4G <- g[[3]]
+save(g_S4E, g_S4F, g_S4G, file = str_c(fig_out_dir(), "supplementary_ggplots/S4EG.Rdata"))
+
+# ggsave(g, filename = str_c(fig_out_dir(), "S4EG.pdf"), width = 14, height = 5, device = cairo_pdf)
 
 ```
 

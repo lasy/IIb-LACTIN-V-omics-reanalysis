@@ -10,10 +10,6 @@ forcats
 lubridate
 magrittr
 patchwork
-viridisLite
-viridis
 gt
+ggtext
 ggthemes
-phyloseq
-ValenciaR
-alto

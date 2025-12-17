@@ -10,7 +10,7 @@ format:
     theme: journal
     embed-resources: true
 execute:
-  cache: true # true | refresh
+  cache: refresh # true | refresh
 project:
   execute-dir: project
 editor: 
@@ -218,7 +218,7 @@ tmp |>
   group_by(Randomized) |> 
   dplyr::count(Arm, name = "n samples with 16S data") |> 
   gt::gt(
-    "Number of samples with 16S rRNA data per arm",
+    caption = "Number of samples with 16S rRNA data per arm",
     row_group_as_column = TRUE
   ) |> 
   gt::summary_rows(
@@ -235,7 +235,7 @@ tmp |>
   dplyr::count(Arm, USUBJID, AVISITN) |> 
   dplyr::count(Arm, name = "n study visits with 16S data") |>
   gt::gt(
-    "Number of unique study visits with 16S rRNA data per arm",
+    caption = "Number of unique study visits with 16S rRNA data per arm",
     row_group_as_column = TRUE
     ) |> 
   gt::summary_rows(
@@ -325,6 +325,74 @@ rm(tmp)
 ```
 
 
+
+##### Reviewing ASVs assignments
+
+```{r}
+ps_original <- ps
+```
+
+
+Specifically, we check and change the ASV taxonomic assignments for *Gardnerella* spp. and *Lactobacillus jensenii/mulieres* 
+
+```{r}
+#| eval: false
+
+ps@tax_table |> 
+  as.data.frame() |> 
+  # as_tibble() |> 
+  dplyr::filter(
+    (Genus == "Gardnerella" & Species != "") | 
+      (Genus == "Lactobacillus" & Species %in% c("jensenii", "mulieris"))
+  )
+
+```
+
+We change the species assignment for these ASVs as follows:
+
+```{r}
+
+tax_table(ps) <-
+  ps@tax_table |> 
+  as.data.frame() |> 
+  mutate(
+    Species_original = Species,
+    Species = 
+      case_when(
+        (Genus == "Lactobacillus") & (Species == "jensenii") ~ "jensenii/mulieres",
+        (Species_original == "swidsinskii_leopoldii") & (Genus == "Gardnerella") & (row_number() == 3) ~ "(ASV G1)",
+        (Species_original == "vaginalis") & (Genus == "Gardnerella") & (row_number() == 6) ~ "(ASV G2)",
+        (Species_original == "piotii") & (Genus == "Gardnerella") & (row_number() == 16) ~ "(ASV G3)",
+        (Genus == "Gardnerella") ~ "",
+        TRUE ~ Species
+      )
+  ) |> 
+  select(Kingdom, Phylum, Class, Order, Family, Genus, Species, Species_original, Gen_Spec) |>
+  as.matrix() |> 
+  tax_table()
+
+```
+
+```{r}
+
+ps@tax_table |> 
+  as.data.frame() |> 
+  as_tibble() |> 
+  mutate(ASV_number = row_number()) |> 
+  dplyr::filter(
+    (Genus == "Gardnerella" & Species_original != "") | 
+      (Genus == "Lactobacillus" & Species_original %in% c("jensenii", "mulieris"))
+  ) |> 
+  arrange(Genus, ASV_number, Species) |> 
+  select(Family, Genus, Species, Species_original, ASV_number) |> 
+  gt::gt(caption = "Subset of the taxonomic table highlighting taxonomic assignment changes.")
+
+```
+
+
+
+
+
 ##### Removing duplicates
 
 We remove sample barcoded `202305517` because it is a duplicate for the same visit (sample barcoded `202305516`) and the latter has more total reads and their values correlate relatively well as shown below.
@@ -352,6 +420,10 @@ ps@otu_table[c("202305516", "202305517"), ] %>%
 ps <- phyloseq::subset_samples(ps, sample_names(ps) != "202305517") 
 
 ```
+
+
+
+
 
 
 ```{r}
@@ -504,7 +576,7 @@ tmp <-
 
 tmp |> 
   dplyr::count(Arm, name = "n samples with 16S data") |> 
-  gt::gt("Number of samples with 16S rRNA data per arm after filtering") 
+  gt::gt(caption = "Number of samples with 16S rRNA data per arm after filtering") 
 
 ```
 
@@ -513,7 +585,7 @@ tmp |>
 tmp |> 
   dplyr::count(Arm, USUBJID, AVISITN) |> 
   dplyr::count(Arm, name = "n study visits with 16S data") |>
-  gt::gt("Number of unique study visits with 16S rRNA data per arm after filtering")
+  gt::gt(caption = "Number of unique study visits with 16S rRNA data per arm after filtering")
 
 ```
 
@@ -534,6 +606,26 @@ The median total reads for included samples is `r median(total_reads)`, IQR = `r
 
 
 
+```{r}
+# Exporting the taxonomic table
+
+spreadsheet_output_dir <- fig_out_dir() |> str_c("spreadsheets/")
+if (!fs::dir_exists(spreadsheet_output_dir)) {
+  fs::dir_create(spreadsheet_output_dir)
+}
+
+tax_table(ps_included) |> 
+  as.data.frame() |>
+  select(-Species_original) |> 
+  rownames_to_column(var = "ASV_sequence") |> 
+  writexl::write_xlsx(
+    path = str_c(spreadsheet_output_dir,"ASV_taxonomic_table.xlsx")
+  )
+
+```
+
+
+
 
 #### Counts agglomerated at the species level
 
@@ -541,7 +633,7 @@ We do this using the `tax_glom` function from the `phyloseq` package.
 
 ```{r}
 
-ps_agg <- phyloseq::tax_glom(ps_included, taxrank = "Species")
+ps_agg <- phyloseq::tax_glom(ps_included, taxrank = "Species", NArm = FALSE)
 SE_tax_16S <- create_SE_from_phyloseq(phyloseq_object = ps_agg)
 
 n_taxa <- ps_agg@otu_table |> ncol()
@@ -822,6 +914,9 @@ mae <-
   )
 
 ```
+
+
+
 ```{r}
 #| eval: false
 # check
@@ -842,15 +937,15 @@ assay_list <-
 
 mae_sample_map <- 
   mae@sampleMap |> as_tibble() |> filter(assay %in% assay_list$assay) |> 
-  rename(Barcode = primary) |>
-  select(Barcode, assay) |> 
+  dplyr::rename(Barcode = primary) |>
+  dplyr::select(Barcode, assay) |> 
   arrange(Barcode) |> 
   left_join(assay_list, by = join_by(assay))
 
 all_shipped_swabs <- 
   colData |> 
   as_tibble() |> 
-  select(Barcode, USUBJID, ARM, AVISITN, PIPV, DAY) |>
+  dplyr::select(Barcode, USUBJID, ARM, AVISITN, PIPV, DAY) |>
   left_join(mae_sample_map, by = join_by(Barcode)) |> 
   group_by(Barcode, USUBJID, ARM, AVISITN, PIPV, DAY) |>
   summarize(
@@ -992,7 +1087,6 @@ sessionInfo()
 ```
 
 </div></div>
-
 
 
 

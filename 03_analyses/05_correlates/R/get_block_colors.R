@@ -14,7 +14,7 @@ get_block_colors <- function(block_names){
   block_colors <-
     bind_rows(
       tibble(block = "Arm", color = "orange"),
-      tibble(block = c("Demographics", "Demogr."), color = "mediumpurple"),
+      tibble(block = c("Demographics", "Demogr.", "Demographics with site"), color = "mediumpurple"),
       
       
       tibble(block = "Vag. env. pre-MTZ", color = "deeppink4"),

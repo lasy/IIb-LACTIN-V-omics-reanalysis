@@ -98,7 +98,8 @@ plot_cytokine_to_preMTZ <- function(cytokines_to_preMTZ, value_label = NULL, add
   
   g +
     geom_boxplot(outlier.shape = NA, col = "gray50", fill = "gray80") +
-    geom_jitter(aes(col = microbiota), size = 0.75, height = 0, width = 0.15) +
+    # geom_jitter(aes(col = microbiota), size = 0.75, height = 0, width = 0.15) +
+    ggbeeswarm::geom_quasirandom(aes(col = microbiota), size = 0.75, width = 0.25) +
     scale_color_manual(
       "Microbiota category", values = get_topic_colors(c("I","III","IV")),
       guide = guide_legend(override.aes = list(size = 2))
@@ -179,6 +180,29 @@ effects_of_intervention_wilcox <- function(cytokine, cytokines_to_preMTZ) {
     estimate = wilcox_res$estimate,
     CI_lower = wilcox_res$conf.int[1],
     CI_upper = wilcox_res$conf.int[2]
+  )
+  
+}
+
+
+
+effects_of_intervention_student <- function(cytokine, cytokines_to_preMTZ) {
+  tmp <- 
+    cytokines_to_preMTZ |> 
+    filter(cytokine == !!cytokine, Visit == "Week 24") |> 
+    select(USUBJID, ARM, diff, Visit) |> 
+    mutate(ARM = factor(ARM, levels = c("LACTIN-V", "Placebo")))
+  
+  # Wilcoxon test for differences in cytokine concentrations between the two arms at week 24
+  
+  ttest_res <- t.test(diff ~ ARM, data = tmp, conf.int = TRUE, var.equal = TRUE)
+  tibble(
+    cytokine = cytokine,
+    t = ttest_res$statistic,
+    p_value = ttest_res$p.value,
+    estimate = ttest_res$estimate |> diff() |> multiply_by(-1),
+    CI_lower = ttest_res$conf.int[1],
+    CI_upper = ttest_res$conf.int[2]
   )
   
 }

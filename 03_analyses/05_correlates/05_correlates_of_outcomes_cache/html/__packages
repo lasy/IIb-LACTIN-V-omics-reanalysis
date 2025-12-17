@@ -25,3 +25,4 @@ iterators
 doParallel
 ggthemes
 phyloseq
+gtsummary

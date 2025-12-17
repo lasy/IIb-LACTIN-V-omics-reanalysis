@@ -758,7 +758,7 @@ plot_number_of_paths(compute_number_of_paths(aligned_topics_product)) +
 
 ```
 
-This suggests that there might be 7 or 9 true sub-communities.
+This suggests that there might be 8 or 9 true sub-communities.
 
 We can also examine the distribution of *coherence* and *refinement* scores:
 
@@ -781,15 +781,15 @@ We can check the sub-communities composition for a selection of Ks:
 #| fig-height: 8
 #| fig-width: 12
 
-plot_beta(aligned_topics_transport, models = c(5, 6, 7, 9)) +
+plot_beta(aligned_topics_transport, models = c(5, 6, 7, 8, 9)) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
 
 ```
 
-From these plots, it looks like K = 7 might be a good compromise between dimension reduction, representation accuracy, and minimizing the number of spurious topics.
+From these plots, it looks like K = 8 might be a good compromise between dimension reduction, representation accuracy, and minimizing the number of spurious topics.
 
 
-We note that at none of these resolutions (K = 5, 6, 7, 9) do we find any topic similar to the subCSTs IV-C(0-4).
+We note that at none of these resolutions (K = 5, 6, 7, 8, 9) do we find any topic similar to the subCSTs IV-C(0-4).
 
 #### Optimal topic model
 
@@ -798,7 +798,7 @@ We store the sample topic-mixtures and the topic composition as a SE in the MAE
 
 ```{r}
 
-optimal_K <- 7
+optimal_K <- 8
 topic_SE <- 
   make_topic_SE(
     assay_name = str_c("topics_16S_", optimal_K), 
@@ -816,15 +816,16 @@ reflect actual biology, which would be interesting to study, but this may also
 simply correspond to a data-set specific "statistical optimum" that does not
 have a biological interpretation.
 
-The main "issue" is with the topic V dominated by *L. jensenii*:
+The main "issue" is with the topic dominated by *L. jensenii*:
 
 ```{r}
 #| fig-height: 4
+#| fig-width: 8
 #| warning: false
 
-beta_long <- get_beta_long(mae, assayname = "topics_16S_7")
+beta_long <- get_beta_long(mae, assayname = "topics_16S_8")
 beta_long |> 
-  filter(topic_subcst_matching_label %in% c("I","III","V")) |> 
+  filter(topic_subcst_matching_label %in% c("I","III","V") | str_detect(topic_label, "L. jensenii/mulieres")) |> 
   filter(prop > 1/500) |>
   arrange(topic, -prop) |>
   mutate(taxa = taxa |> factor(levels = unique(taxa))) |> 
@@ -882,11 +883,11 @@ props_long_lacto <-
 #   xlab("Taxa") 
 
 g <- 
-props_long_lacto |> 
+  props_long_lacto |> 
   ggplot(aes(y = taxa |> fct_rev(), x = prop, col = taxa)) +
   geom_jitter(width = 0, height = 0.15, size  = 0.5) +
   xlab("Proportion in samples") + ylab("") +
-  scale_color_manual(values = get_topic_colors(c("III","I", "V", rep("VI", 7)))) +
+  scale_color_manual(values = get_topic_colors(c("III","I", "V", rep("VI", 8)))) +
   guides(col = "none")
 
 g
@@ -897,10 +898,12 @@ g
 
 ```{r}
 
-ggsave(g, filename = str_c(fig_out_dir(), "S2C.pdf"), width = 10, height = 3, device = cairo_pdf)
+g_S2C <- g
+save(g_S2C, file = str_c(fig_out_dir(), "supplementary_ggplots/S2C.Rdata"))
+
+# ggsave(g, filename = str_c(fig_out_dir(), "S2C.pdf"), width = 10, height = 3, device = cairo_pdf)
 
 ```
-
 
 Among all Lactobacillus species, there are only 3 making more than 50% of a
 sample in at least 10 samples: *Lactobacillus iners, crispatus*, and *jensenii.*
@@ -924,13 +927,13 @@ Lacto_topics_beta <-
 
 Lacto_topics_beta["Lactobacillus crispatus","I"] <- 1
 Lacto_topics_beta["Lactobacillus iners","III"] <- 1
-Lacto_topics_beta["Lactobacillus jensenii","V"] <- 1
+Lacto_topics_beta["Lactobacillus jensenii/mulieres","V"] <- 1
 
 all_Lacto_species <- str_subset(colnames(props), "Lactobacillus")
 other_Lacto_species <- 
 setdiff(
   all_Lacto_species, 
-  str_c("Lactobacillus ", c("crispatus","iners","jensenii"))
+  str_c("Lactobacillus ", c("crispatus","iners","jensenii/mulieres"))
   )
 
 Lacto_topics_beta[other_Lacto_species,"VI"] <- 
@@ -961,7 +964,7 @@ Lacto_topics_beta |>
 
 Lacto_topics_gamma <- 
   cbind(
-    props[, str_c("Lactobacillus ", c("crispatus","iners","jensenii"))], 
+    props[, str_c("Lactobacillus ", c("crispatus","iners","jensenii/mulieres"))], 
     rowSums(props[, other_Lacto_species])
   ) |> 
   set_colnames(c("I","III","V","VI"))
@@ -1091,7 +1094,12 @@ g
 
 ```{r}
 
-ggsave(g, filename = str_c(fig_out_dir(), "S2AB.pdf"), width = 13, height = 6, device = cairo_pdf)
+g_S2A <- g[[1]]
+g_S2B <- g[[2]]
+save(g_S2A, file = str_c(fig_out_dir(), "supplementary_ggplots/S2A.Rdata"))
+save(g_S2B, file = str_c(fig_out_dir(), "supplementary_ggplots/S2B.Rdata"))
+
+# ggsave(g, filename = str_c(fig_out_dir(), "S2AB.pdf"), width = 13, height = 6, device = cairo_pdf)
 
 ```
 
@@ -1220,18 +1228,18 @@ Since both models (K = 4 or K = 5) are saved, we can use either of them in downs
 ```{r}
 
 estimated_sample_composition <- 
-  t(assay(mae[["c_topics_16S_8"]])) %*% mae[["c_topics_16S_8"]]@metadata$beta
+  t(SummarizedExperiment::assay(mae[["c_topics_16S_8"]])) %*% mae[["c_topics_16S_8"]]@metadata$beta
 
 observed_sample_composition <- 
-  t(assay(mae[["tax_16S_p"]]))[rownames(estimated_sample_composition), colnames(estimated_sample_composition)] 
+  t(SummarizedExperiment::assay(mae[["tax_16S_p"]]))[rownames(estimated_sample_composition), colnames(estimated_sample_composition)] 
 
 class(observed_sample_composition) <- "matrix"
 
-est_vs_obs <- 
-  array(
-    c(estimated_sample_composition, observed_sample_composition),
-    dim = c()
-    )
+# est_vs_obs <- 
+#   array(
+#     c(estimated_sample_composition, observed_sample_composition),
+#     dim = c()
+#     )
 
 topic_tmp <- 
   tibble(
@@ -1311,13 +1319,13 @@ Lacto_topics_beta["Lactobacillus crispatus (CTV05)","I.a"] <- 1
 Lacto_topics_beta["Lactobacillus crispatus (non-CTV05)","I.b"] <- 1
 Lacto_topics_beta["Lactobacillus crispatus (?)","I.c"] <- 1
 Lacto_topics_beta["Lactobacillus iners","III"] <- 1
-Lacto_topics_beta["Lactobacillus jensenii","V"] <- 1
+Lacto_topics_beta["Lactobacillus jensenii/mulieres","V"] <- 1
 
 all_Lacto_species <- str_subset(colnames(props), "Lactobacillus")
 other_Lacto_species <- 
 setdiff(
   all_Lacto_species, 
-  str_c("Lactobacillus ", c("crispatus","iners","jensenii"))
+  str_c("Lactobacillus ", c("crispatus","iners","jensenii/mulieres"))
   )
 
 Lacto_topics_beta[other_Lacto_species,"VI"] <- 
@@ -1379,7 +1387,7 @@ pure_lacto_topics <-
     "Lactobacillus crispatus (non-CTV05)",
     "Lactobacillus crispatus (?)",
     "Lactobacillus iners",
-    "Lactobacillus jensenii"
+    "Lactobacillus jensenii/mulieres"
   )
 
 Lacto_topics_gamma <- 

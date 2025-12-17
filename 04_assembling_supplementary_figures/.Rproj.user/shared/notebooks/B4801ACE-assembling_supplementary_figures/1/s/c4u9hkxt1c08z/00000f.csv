@@ -1,0 +1,6 @@
+"0",""
+"0","ggsave("
+"0","  plot = fig_S5, filename = str_c(fig_out_dir(), ""FigS5.pdf""), "
+"0","  width = 5, height = 3.5, scale = 2, device = cairo_pdf"
+"0","  )"
+"0",""

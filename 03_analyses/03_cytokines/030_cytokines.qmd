@@ -6,10 +6,11 @@ format:
     code-fold: true
     toc: true
     toc-location: left
+    toc-depth: 5
     theme: journal
     number-sections: true
 execute:
-  cache: true
+  cache: true # true refresh
   warning: false
 project:
   execute-dir: project
@@ -86,13 +87,27 @@ cat("N samples: ", length(unique(cytokines_long$Barcode)), "\n")
 ```{r}
 
 categories_levels <- 
-  c("≥ 50% L. crispatus", "≥ 50% Lactobacillus, < 50% L. crispatus", "< 50% Lactobacillus")
+  c(
+    "≥ 50% L. crispatus", 
+    "≥ 50% Lactobacillus, < 50% L. crispatus", 
+    "< 50% Lactobacillus")
+
 microbiota_categories <- 
   get_assay_long_format(
     mae, "mb_categories", add_colData = FALSE, values_name = "microbiota"
   ) |> 
   select(-feature) |> 
-  mutate(microbiota = microbiota |> factor(levels = categories_levels))
+  mutate(
+    microbiota = microbiota |> factor(levels = categories_levels)
+    ) |> 
+  arrange(microbiota) |> 
+  mutate(
+    microbiota = 
+      microbiota |> 
+      str_replace("L. crispatus", "*L. crispatus*") |> 
+      str_replace("Lactobacillus", "*Lactobacillus*") |> 
+      fct_inorder()
+    )
 
 cytokines_long <- 
   cytokines_long |> 
@@ -131,7 +146,13 @@ part_1_plots <-
       filter(cytokine == .x) |> 
       filter(!(Visit %in% c("Week 4", "Week 8"))) |> 
       plot_cytokine_to_preMTZ(value_label = value_label) +
-      xlab("")
+      xlab("") +
+      ggpubr::stat_pvalue_manual(
+        data = w_test_res |> filter(cytokine == .x)
+        ) +
+      theme(
+        legend.text = element_markdown()
+      )
   )
 
 part_1_plots |> 

@@ -28,6 +28,7 @@ library(magrittr)
 library(patchwork)
 library(gt)
 library(ggrepel)
+library(ggtext)
 library(ggalluvial)
 library(MultiAssayExperiment)
 library(SummarizedExperiment)
@@ -262,6 +263,196 @@ table_1 |>
 ```
 
 
+### Alternative outcome: relative abundance of *L. crispatus*
+
+
+```{r}
+
+L_crisp_rel_ab <- 
+  get_assay_long_format(mae, "prop_Lacto") |> 
+  filter(feature == "prop_L_crisp", AVISITN %in% c(4, 7)) |> 
+  mutate(
+    L_crisp_rel_ab = value,
+    Visit = AVISITN |> get_visit_labels()
+    ) |> 
+  select(USUBJID, ARM, Visit, L_crisp_rel_ab)
+
+L_crisp_rel_ab_summary <- 
+  L_crisp_rel_ab |> 
+  group_by(Visit, ARM) |> 
+  summarize(
+    n = n(),
+    mean = mean(L_crisp_rel_ab),
+    sd_rel_ab = sd(L_crisp_rel_ab, na.rm = TRUE),
+    se = sd_rel_ab / sqrt(n), 
+    ci_lower = pmax(0, mean - qt(0.975, df = pmax(n - 1, 1)) * se),
+    ci_upper = pmin(1, mean + qt(0.975, df = pmax(n - 1, 1)) * se),
+    .groups = "drop"
+    )
+
+
+```
+
+```{r}
+#| fig-width: 5
+#| fig-height: 2
+
+g_continuous <- 
+  L_crisp_rel_ab |> 
+  ggplot() +
+  aes(x = ARM, y = L_crisp_rel_ab, col = ARM, fill = ARM) +
+  facet_grid(. ~ Visit) +
+  geom_violin(bw = 0.075, bounds = c(0, 1), scale = "width", alpha = 0.3, linewidth = 0.2, color = "transparent") + # 
+  ggbeeswarm::geom_quasirandom(size = 1, alpha = 0.5) +
+  geom_linerange(
+    data = L_crisp_rel_ab_summary, 
+    aes(x = ARM, y = mean, ymin = ci_lower, ymax = ci_upper), 
+    col = "black", linewidth = 1, alpha = 0.6, lineend = "round"
+  ) +
+  geom_point(
+    data = L_crisp_rel_ab_summary, 
+    aes(x = ARM, y = mean), col = "black", size = 3, shape = 18 
+  ) +
+  scale_y_continuous(
+    expression(paste(italic("L. crisp."), " rel. ab.")),
+    labels = scales::percent_format()
+  ) +
+  xlab("") +
+  scale_color_manual(values = get_arm_colors()) +
+  scale_fill_manual(values = get_arm_colors()) +
+  guides(col = "none", fill = "none") +
+  theme()
+
+g_continuous
+
+```
+
+
+```{r}
+#| fig-width: 5
+#| fig-height: 2.5
+
+g_continuous_boxplot <- 
+  L_crisp_rel_ab |> 
+  ggplot() +
+  aes(x = ARM, y = L_crisp_rel_ab, col = ARM, fill = ARM) +
+  facet_grid(. ~ Visit) +
+  # geom_violin(bw = 0.075, bounds = c(0, 1), scale = "width", alpha = 0.3, linewidth = 0.2, color = "transparent") + # 
+  geom_boxplot(alpha = 0.2) +
+  ggbeeswarm::geom_quasirandom(size = 1, alpha = 0.5) +
+  scale_y_continuous(
+    expression(paste(italic("L. crisp."), " rel. ab.")),
+    labels = scales::percent_format()
+  ) +
+  xlab("") +
+  scale_color_manual(values = get_arm_colors()) +
+  scale_fill_manual(values = get_arm_colors()) +
+  guides(col = "none", fill = "none") +
+  theme()
+
+g_continuous_boxplot
+
+```
+
+
+```{r}
+
+L_crisp_rel_ab_summary |> 
+  group_by(Visit) |> 
+  mutate(
+    ci = str_c(ci_lower |> scales::percent(accuracy = 0.1), " - ", ci_upper |> scales::percent(accuracy = 0.1)),
+    mean = mean |> scales::percent(accuracy = 0.1)
+  ) |> 
+  select(-sd_rel_ab, -se, -ci_lower, -ci_upper) |>
+  gt(
+    caption = "Mean relative abundance of L. crispatus (and 95% CI) at week 12 and week 24 in both arms",
+    row_group_as_column = TRUE
+  ) |> 
+  cols_label(
+    ARM = "Study arm",
+    n = "N",
+    mean = "Mean rel. ab.",
+    ci = "95% CI"
+  )
+
+```
+
+
+
+```{r}
+
+L_crisp_rel_ab |> 
+  group_by(Visit) |> 
+  summarize(
+    n = n(),
+    n_in_middle = sum((L_crisp_rel_ab > 1/3) & (L_crisp_rel_ab < 2/3)),
+  ) |> 
+  ungroup() |> 
+  mutate(perc_in_middle = n_in_middle/n) |> 
+  gt(
+    caption = "Number and percentage of participants with relative abundance of L. crispatus between 33% (1/3) and 67% (2/3) at week 12 and week 24",
+    row_group_as_column = TRUE
+  ) |> 
+  cols_label(
+    Visit = "Visit",
+    n = "N",
+    n_in_middle = "N (33% < rel. ab. < 67%)",
+    perc_in_middle = "Perc. (33% < rel. ab. < 67%)"
+  ) |> 
+  fmt_percent(
+    columns = perc_in_middle,
+    decimals = 2
+  )
+
+
+```
+
+```{r}
+
+
+map(
+  .x = seq(1/3, 2/3, by = 1/12),
+  .f = function(thresh){
+    L_crisp_rel_ab |> 
+      mutate(outcome = str_c("L. crisp. ", ifelse(L_crisp_rel_ab >= thresh, "≥", "<")," ", scales::percent(thresh, accuracy = 1))) |> 
+      dplyr::count(Visit, ARM, outcome) |> 
+      arrange(Visit, ARM, outcome) |> 
+      mutate(thresh = scales::percent(thresh, accuracy = 1))
+  } 
+) |> 
+  bind_rows() |>
+  select(thresh, everything()) |> 
+  arrange(thresh, Visit, outcome, ARM |> desc()) |> 
+  group_by(thresh, Visit) |> 
+  mutate(
+    BR = epitools::riskratio(x = matrix(n, nrow = 2))$measure[2,1],
+    CI_low = epitools::riskratio(x = matrix(n, nrow = 2))$measure[2,2],
+    CI_high = epitools::riskratio(x = matrix(n, nrow = 2))$measure[2,3],
+    Benefit_Ratio = str_c(BR |> round(2), " (", CI_low |> round(2), " - ", CI_high |> round(2), ")")
+  ) |> 
+  select(-BR, -CI_low, -CI_high) |> 
+  pivot_wider(names_from = ARM, values_from = n, names_prefix = "N ") |>
+  relocate(Benefit_Ratio, .after = last_col()) |>
+  mutate(
+    Benefit_Ratio = ifelse(str_detect(outcome, "≥"), Benefit_Ratio, "")
+    ) |> 
+  group_by(thresh) |> 
+  gt(
+    row_group_as_column = TRUE,
+    caption = "Benefit ratios (and 95% CI) for different thresholds of L. crispatus relative abundance at week 12 and week 24. 
+    Thresholds range from 33% to 67% in increments of 8.33%, representing evenly distributed cut-offs"
+  )
+
+  
+
+# and well-separated by our pre-specified 50% threshold
+
+```
+
+
+
+
+
 ## Relationship between BV and endpoints.
 
 
@@ -435,31 +626,43 @@ g_sankey <-
     strip.text.y = element_text(angle = -90, hjust = 0.5)
   )
 
+category_labels <- 
+  c(sankey_data$endpoint |> levels(), "") |> 
+  str_replace(", < 50% L. crispatus", ", < 50% *L.c.*") |> 
+  str_replace("L. crispatus", "*L. crispatus*") |> 
+  str_replace("Lactobacillus", "*Lactobacillus*")
+category_colors <- 
+  c(
+    get_topic_colors(c("I","III", "IV") |> rev()), "gray80", "transparent"
+  )
+
 g_sankey_v1 <- 
   g_sankey +
   scale_fill_manual(
     "Category", 
-    labels = c(sankey_data$endpoint |> levels(),"") |> str_replace(", < 50% L. crispatus", ", < 50% L.c."),
-    values = c(
-      get_topic_colors(c("I","III", "IV") |> rev()), "gray80", "transparent"
-    ), 
+    labels = category_labels,
+    values = category_colors, 
     na.value = "transparent",
     guide = guide_legend(direction = "vertical")
   ) +
-  theme(legend.position = "right")
+  theme(
+    legend.position = "right", 
+    legend.text = element_markdown() 
+  )
 
 g_sankey_v2 <- 
   g_sankey +
   scale_fill_manual(
     "Category", 
-    labels = c(sankey_data$endpoint |> levels(),"") |> str_replace(", < 50% L. crispatus", ", < 50% L.c."),
-    values = c(
-      get_topic_colors(c("I","III", "IV") |> rev()), "gray80", "transparent"
-    ), 
+    labels = category_labels,
+    values = category_colors, 
     na.value = "transparent",
     guide = guide_legend(nrow = 2, direction = "horizontal")
   ) +
-  theme(legend.position = "top")
+  theme(
+    legend.position = "top", 
+    legend.text = element_markdown() 
+    )
   
 
 g_sankey_v2
@@ -766,11 +969,12 @@ g_topics_comp_v2 <-
   plot_topic_betas(
     mae, "c_topics_16S_8", exclude_lacto_topics = TRUE, 
     topic_label = "topic_label",
-    threshold = 1/100, direction = "v"
+    threshold = 1/50, direction = "v"
   ) +
   theme(
     legend.position = "top", legend.box.margin = margin(r = 140),
-    axis.text.x = element_text(angle = 45, hjust = 1)
+    axis.text.x = element_markdown(angle = 45, hjust = 1),
+    axis.text.y = element_markdown()
     )
 
 g_topics_comp_v2
@@ -830,6 +1034,21 @@ tmp <-
   tmp |> 
   mutate(Arm = ARM |> str_replace("ACTIN", "actin"))
 
+tmp <- 
+  tmp |> 
+  arrange(topic_label) |> 
+  mutate(
+    topic_print_label = 
+      str_c("*", topic_label, "*") |> 
+      str_replace("jensenii/mulieres", "jens./mul.") |>
+      str_replace(" topic\\*", "* topic") |> 
+      str_replace("\\*Other ", "Other *") |> 
+      str_replace(" L\\. v\\. \\(BVAB1\\)\\*", "* L. v. (BVAB1)") |> 
+      fct_inorder()
+  )
+
+# tmp |> dplyr::count(topic_label, topic_print_label)
+
 ```
 
 ```{r}
@@ -837,16 +1056,16 @@ tmp <-
 #| fig-width: 7
 
 
-topic_labels <- c(
-  expression(italic("L. crisp.")),
-  expression(italic("L. iners")),
-  expression(italic("L. jensenii")),
-  expression(Other~italic("L.")), 
-  expression(italic("G. s./l.")~"topic"),
-  expression(italic("P. amnii")~"topic"),
-  expression(italic("Ca. L. v.")~"(BVAB1) topic"),
-  expression(italic("P. bivia")~"topic")
-)
+# topic_labels <- c(
+#   expression(italic("L. crisp.")),
+#   expression(italic("L. iners")),
+#   expression(italic("L. jens./mul.")),
+#   expression(Other~italic("L.")), 
+#   expression(italic("Gardnerella")~"topic"),
+#   expression(italic("Ca.")~"L. v. (BVAB1) topic"),
+#   expression(italic("P. bivia")~"topic"),
+#   expression(italic("P. timonensis")~"topic")
+# )
   
 
 g_subcommunities_traj <- 
@@ -857,7 +1076,8 @@ g_subcommunities_traj <-
   scale_fill_manual(
     "Taxon\nor topic", 
     values = get_topic_colors(tmp$topic_label |> levels()),
-    breaks = tmp$topic_label |> levels(), labels = topic_labels
+    breaks = tmp$topic_label |> levels(), 
+    labels = tmp$topic_print_label |> levels()
   ) +
   scale_y_discrete("Participants\n(ordered by microbiota composition)", breaks = NULL) +
   facet_grid(Arm ~ visit, scales = "free", space = "free") +
@@ -865,6 +1085,7 @@ g_subcommunities_traj <-
   scale_x_continuous("Relative abundance", breaks = seq(0, 1, l = 3), labels = c(0, 0.5, 1)) +
   theme(
     strip.text.y = element_text(angle = -90, hjust = 0.5),
+    legend.text = element_markdown(),
     legend.position = "top"
   )
 
@@ -889,15 +1110,20 @@ g_violin <-
   scale_fill_manual(
     "Taxon\nor topic", 
     values = get_topic_colors(tmp$topic_label |> levels()),
-    breaks = tmp$topic_label |> levels(), labels = topic_labels
+    breaks = tmp$topic_label |> levels(), 
+    labels = tmp$topic_print_label |> levels()
   ) +
   scale_color_manual(
     "Taxon\nor topic", 
     values = get_topic_colors(tmp$topic_label |> levels()),
-    breaks = tmp$topic_label |> levels(), labels = topic_labels
+    breaks = tmp$topic_label |> levels(), 
+    labels = tmp$topic_print_label |> levels()
   ) +
   scale_x_discrete("Taxon or topic", breaks = NULL) +
-  scale_y_continuous("Relative abundance", labels = scales::label_percent()) 
+  scale_y_continuous("Relative abundance", labels = scales::label_percent()) +
+  theme(
+    legend.text = element_markdown()
+  )
 
 
 g_violin
@@ -905,7 +1131,9 @@ g_violin
 ```
 ```{r}
 
-ggsave(g_violin, filename = str_c(fig_out_dir(), "S2D.pdf"), width = 13, height = 6, device = cairo_pdf)
+g_S2D <- g_violin 
+save(g_S2D, file = str_c(fig_out_dir(), "supplementary_ggplots/S2D.Rdata"))
+# ggsave(g_violin, filename = str_c(fig_out_dir(), "S2D.pdf"), width = 13, height = 6, device = cairo_pdf)
 
 ```
 
@@ -919,24 +1147,28 @@ g_spaghetti <-
   arrange(USUBJID, visit) |> 
   ggplot() +
   aes(x = visit, y = prop,  col = topic_label) +
-  facet_grid(Arm ~ topic_label |> str_replace("topic", "\ntopic") |> str_replace("\\(BVAB1\\) \ntopic", "\n\\(BVAB1\\) topic") |> fct_inorder()) +
+  facet_grid(Arm ~ topic_print_label |> str_replace("topic", "<br>topic") |> str_replace("\\(BVAB1\\) <br>topic", "<br>\\(BVAB1\\) topic") |> fct_inorder()) +
   geom_path(aes(group = USUBJID), alpha = 0.3, linewidth = 0.5) +
   geom_point(alpha = 0.8, size = 0.5) +
   scale_fill_manual(
     "Taxon\nor topic", 
     values = get_topic_colors(tmp$topic_label |> levels()),
-    breaks = tmp$topic_label |> levels(), labels = topic_labels
+    breaks = tmp$topic_label |> levels(), 
+    labels = tmp$topic_print_label |> levels()
   ) +
   scale_color_manual(
     "Taxon\nor topic", 
     values = get_topic_colors(tmp$topic_label |> levels()),
-    breaks = tmp$topic_label |> levels(), labels = topic_labels
+    breaks = tmp$topic_label |> levels(), 
+    labels = tmp$topic_print_label |> levels()
   ) +
   scale_x_discrete("Visit") +
   scale_y_continuous("Relative abundance", labels = scales::label_percent()) +
   guides(col = "none") +
   theme(
-    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5) 
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.text = element_markdown(),
+    strip.text.x = element_markdown()
   ) 
 
 g_spaghetti
@@ -1060,19 +1292,72 @@ BC_between_visits_with_endpoints <-
 ```
 
 
+```{r}
+
+BC_between_visits_with_endpoints |> 
+  filter(v1 >= 2, ARM == "LACTIN-V") |> 
+  mutate(
+    mb_categories = 
+      ifelse(mb_categories_v1 == "≥ 50% L. crispatus", "≥ 50% L. crispatus", "< 50% L. crispatus") |> 
+      factor()
+  ) |> 
+  group_by(ARM, mb_categories, v1_label, v2_label) |> 
+  summarize(
+    median_BC = median(BC),
+    q25 = quantile(BC, p = 0.25),
+    q75 = quantile(BC, p = 0.75),
+    median_and_IQR = str_c(
+      median_BC |> format(digits = 2), 
+      " (", q25 |> format(digits = 2), " - ", q75 |> format(digits = 2), ")"
+    ),
+    mean_BC = mean(BC),
+    ci_lower = pmax(0, t.test(BC)$conf.int[1]),
+    ci_upper = pmin(1, t.test(BC)$conf.int[2]),
+    mean_and_CI = str_c(
+      mean_BC |> format(digits = 2), 
+      " (", ci_lower |> format(digits = 2), " - ", ci_upper |> format(digits = 2), ")"
+    ),
+    n = n(),
+    .groups = "drop"
+  ) |>  
+  mutate(
+    visits = str_c(v1_label, " to ", v2_label) |> fct_inorder()
+   ) |> 
+  select(
+    visits, mb_categories, n,
+    median_and_IQR, mean_and_CI
+  ) |>
+  arrange(visits) |>
+  group_by(visits) |> 
+  gt(
+    caption = "Median (IQR) and mean (95% CI) Bray-Curtis dissimilarities between samples at consecutive visits for participants in the Lactin-V arm, stratified by microbiota category at the first of the two consecutive visits.",
+    row_group_as_column = TRUE
+  ) |> 
+  cols_label(
+    mb_categories = "Microbiota category",
+    n = "N",
+    median_and_IQR = "Median (IQR) BC",
+    mean_and_CI = "Mean (95% CI) BC"
+  )
+  
+
+```
+
+
+
 
 ```{r}
 #| fig-height: 6
 #| fig-width: 10
 
 g <- 
-BC_between_visits_with_endpoints |> 
+  BC_between_visits_with_endpoints |> 
   arrange(mb_categories_v1) |> 
   mutate(
     xlabels = mb_categories_v1 |> str_replace(",", ",\n") |> fct_inorder()
   ) |> 
   ggplot(aes(x = xlabels, y = BC, fill = mb_categories_v1, col = mb_categories_v1)) +
-  geom_violin(col = NA, scale = "width", alpha = 0.5, drop = TRUE) +
+  geom_violin(col = "white", scale = "width", alpha = 0.5, drop = TRUE, draw_quantiles = c(0.25, 0.5, 0.75)) +
   ggbeeswarm::geom_quasirandom(size = 0.5) +
   # geom_boxplot(alpha = 0.75, outlier.size = 0.5, varwidth = TRUE) +
   facet_grid(Arm ~ v1_label) +
@@ -1090,7 +1375,9 @@ g
 ```
 ```{r}
 
-ggsave(g, filename = str_c(fig_out_dir(), "S2E.pdf"), width = 13, height = 6, device = cairo_pdf)
+g_S2E <- g
+save(g_S2E, file = str_c(fig_out_dir(), "supplementary_ggplots/S2E.Rdata"))
+# ggsave(g, filename = str_c(fig_out_dir(), "S2E.pdf"), width = 13, height = 6, device = cairo_pdf)
 
 ```
 
@@ -1426,7 +1713,7 @@ p_week12_comp <-
   g_12_LV + 
   (
     g_12_P + 
-      theme(strip.text.x = element_text(color = "transparent")) +  
+      theme(strip.text.x = element_markdown(color = "transparent")) +  
       plot_layout(tag_level = "new")
   ) +
   plot_layout(guides = "collect", ncol = 1) &
@@ -1485,16 +1772,17 @@ fig_1
 
 fig_1 <- 
   free(g_study_timeline) + # a 
-  g_sankey_v2 + theme(legend.position = "bottom") + # b # xlab("") +
+  free(g_sankey_v2 + theme(legend.position = "bottom")) + # b # xlab("") +
   p_week12_comp + # c
-  g_load_v2 + # d
+  g_continuous + # d
+  g_load_v1 + # e
   plot_layout(
     heights = c(3, 4, 2),
     widths = c(1, 1.15),
     design = 
       "AA
       BC
-      DC
+      DE
     "
   ) +
   plot_annotation(tag_levels = "A") &
@@ -1507,7 +1795,7 @@ fig_1
 
 ```{r}
 
-ggsave(fig_1, filename = str_c(fig_out_dir(), "Fig1.pdf"), width = 13, height = 10, device = cairo_pdf)
+ggsave(fig_1, filename = str_c(fig_out_dir(), "Fig1.pdf"), width = 6.5, height = 5, scale = 2, device = cairo_pdf)
 
 ```
 
@@ -1524,12 +1812,12 @@ ggsave(fig_1, filename = str_c(fig_out_dir(), "Fig1.pdf"), width = 13, height = 
 fig_2 <- 
   free(g_topics_comp_v2) + # A
   free(g_subcommunities_traj) + # B
-    g_spaghetti + # C
+  free(g_spaghetti) + # C
   g_BC_successive + # D
 
   plot_layout(
     heights = c(4, 1),
-    widths = c(2, 4, 1.5),
+    widths = c(2, 4, 1.7),
     design = 
       "ABB
       CCD

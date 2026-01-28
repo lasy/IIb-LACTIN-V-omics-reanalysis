@@ -1,4 +1,5 @@
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18401483.svg)](https://doi.org/10.5281/zenodo.18401483)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18401700.svg)](https://doi.org/10.5281/zenodo.18401700)
+
 
 # IIb-LACTIN-V-omics-reanalysis
 Analyses (`R` scripts and `Quarto` documents) pertaining to the manuscript "Microbiota effects and predictors of *Lactobacillus crispatus* colonization after treatment with a vaginal live biotherapeutic: results from a randomized, double-blinded, placebo-controlled trial" by Bloom, Symul, et al., 2025. MedRxiv doi: [https://doi.org/10.1101/2025.08.18.25333897](https://www.medrxiv.org/content/10.1101/2025.08.18.25333897v1.article-metrics)

@@ -13,3 +13,13 @@ patchwork
 gt
 ggtext
 ggthemes
+matrixStats
+MatrixGenerics
+generics
+BiocGenerics
+S4Vectors
+IRanges
+Seqinfo
+GenomicRanges
+Biobase
+SummarizedExperiment

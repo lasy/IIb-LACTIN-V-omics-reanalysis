@@ -4273,10 +4273,14 @@ g_cytokines <-
 ```
 
 
+
+
+
 ```{r}
 #| fig-height: 9.5
 #| fig-width: 13
 #| cache: false
+#| eval: false
 
 design <- 
 "
@@ -4297,6 +4301,7 @@ fig_6
 
 
 ```{r}
+#| eval: false
 #| cache: false
 set.seed(2)
 ggsave(fig_6, filename = str_c(fig_out_dir(), "Fig6.pdf"), width = 13, height = 9.5, device = cairo_pdf)
@@ -4305,7 +4310,45 @@ ggsave(fig_6, filename = str_c(fig_out_dir(), "Fig6.pdf"), width = 13, height = 
 
 
 
+```{r}
 
+load(str_c(fig_out_dir(), "supplementary_ggplots/g_rates_LC_by_race.Rdata"), verbose = TRUE)
+load(str_c(fig_out_dir(), "supplementary_ggplots/g_rate_diff_LC_by_race.Rdata"), verbose = TRUE)
+
+```
+
+
+```{r}
+#| fig-height: 12
+#| fig-width: 13
+#| cache: false
+
+design <- 
+"
+AA
+BC
+DE
+"
+
+fig_6 <- 
+  free(g_combined_relbicp) +
+  g_biplot + inset_element(g_scree, left = 0.7, bottom = 0.8, right = 1, top = 1, align_to = "plot") +
+  free(g_cytokines) + guides(fill = "none", col = "none") +
+  free(g_rates_LC_by_race) + g_rate_diff_LC_by_race + guides(col = "none") +
+  plot_layout(ncol = 2, heights = c(1, 2, 1), width = c(4.5,3), design = design) + # , guides = "collect"
+  plot_annotation(tag_levels = "A")
+
+fig_6
+  
+```
+
+
+```{r}
+#| cache: false
+set.seed(2)
+ggsave(fig_6, filename = str_c(fig_out_dir(), "Fig6.pdf"), width = 13, height = 12, device = cairo_pdf)
+
+```
 
 ## Supplementary table
 

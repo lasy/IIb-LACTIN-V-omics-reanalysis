@@ -1676,6 +1676,21 @@ models_race <-
 
 
 
+```{r}
+
+AYV <- AYV |> 
+  arrange(Race) |> 
+  mutate(Race2 = Race |> str_replace("Black/African American", "Black/Afr. Am.") |> fct_inorder())
+
+g_rates_LC_by_race <- plot_stratified_risks(AYV, outcomes[1:2], strata = "Race2", min_n_in_each_arm = 2)
+g_rate_diff_LC_by_race <- plot_stratified_differences(AYV, outcomes[1:2], strata = "Race2", min_n_in_each_arm = 2) 
+
+save(g_rates_LC_by_race, file = str_c(fig_out_dir(), "supplementary_ggplots/g_rates_LC_by_race.Rdata")) 
+save(g_rate_diff_LC_by_race, file = str_c(fig_out_dir(), "supplementary_ggplots/g_rate_diff_LC_by_race.Rdata")) 
+
+```
+
+
 
 ## Contraceptive choices
 

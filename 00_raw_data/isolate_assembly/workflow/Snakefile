@@ -1,0 +1,63 @@
+configfile: "config/config.yaml"
+
+import pandas as pd
+
+samples_df = pd.read_csv(config["samples"])
+SAMPLES = samples_df["isolate_id"].tolist()
+
+wildcard_constraints:
+    sample="|".join(SAMPLES)
+
+include: "rules/preprocessing.smk"
+include: "rules/assembly.smk"
+include: "rules/annotation.smk"
+include: "rules/quality_assessment.smk"
+
+rule all:
+    input:
+        expand("results/fastp/{sample}_1.trimmed.fastq.gz", sample=SAMPLES),
+        expand("results/fastp/{sample}_2.trimmed.fastq.gz", sample=SAMPLES),
+        expand("results/unicycler/{sample}/assembly.fasta", sample=SAMPLES),
+        expand("results/bakta/{sample}/{sample}.gff3", sample=SAMPLES),
+        "results/gtdbtk/gtdbtk.bac120.summary.tsv",
+        expand("results/seqkit/{sample}_stats.tsv", sample=SAMPLES),
+        expand("results/checkm2/{sample}/quality_report.tsv", sample=SAMPLES),
+        "results/summary/assembly_stats_all.tsv",
+        "results/summary/checkm2_all.tsv"
+
+rule summarize_stats:
+    input:
+        stats=expand("results/seqkit/{sample}_stats.tsv", sample=SAMPLES)
+    output:
+        "results/summary/assembly_stats_all.tsv"
+    resources:
+        slurm_partition="short",
+        mem_mb=2000,
+        cpus=1,
+        runtime="1h"
+    shell:
+        """
+        echo -e "sample\t$(head -n1 {input.stats[0]})" > {output}
+        for file in {input.stats}; do
+            sample=$(basename $file _stats.tsv)
+            tail -n+2 $file | sed "s/^/$sample\t/" >> {output}
+        done
+        """
+
+rule summarize_checkm2:
+    input:
+        reports=expand("results/checkm2/{sample}/quality_report.tsv", sample=SAMPLES)
+    output:
+        "results/summary/checkm2_all.tsv"
+    resources:
+        slurm_partition="short",
+        mem_mb=2000,
+        cpus=1,
+        runtime="1h"
+    shell:
+        """
+        head -n1 {input.reports[0]} > {output}
+        for file in {input.reports}; do
+            tail -n+2 $file >> {output}
+        done
+        """

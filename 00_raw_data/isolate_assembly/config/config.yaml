@@ -1,0 +1,36 @@
+samples: "config/samples.csv"
+
+fastp:
+  # Adapter sequences (auto-detect if not specified)
+  adapter_r1: ""
+  adapter_r2: ""
+  # Quality filtering
+  qualified_quality_phred: 20
+  # Minimum read length after trimming
+  length_required: 50
+  # PolyG tail trimming for NextSeq/NovaSeq
+  trim_poly_g: true
+  # PolyX tail trimming
+  trim_poly_x: true
+  # Complexity filtering
+  complexity_threshold: 30
+
+unicycler:
+  mode: "normal"
+  min_fasta_length: 200
+  kmers: "21,33,55,77,99,127"
+  keep: 1
+  spades_options: "--careful"
+
+bakta:
+  db: "/n/groups/kwon/joseph/dbs/bakta_db_v5/"
+  genus: "Unknown"
+  species: "sp."
+  min_contig_length: 1000
+
+gtdbtk:
+  database_path: "/n/groups/kwon/joseph/dbs/gtdb"
+
+checkm2:
+  database_path: "/n/groups/kwon/joseph/dbs/checkm2/CheckM2_database/uniref100.KO.1.dmnd"
+  lowmem: "--lowmem"

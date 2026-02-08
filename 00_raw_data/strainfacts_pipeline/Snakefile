@@ -1,0 +1,282 @@
+import pandas as pd
+from collections import defaultdict
+
+psomagen_samples = pd.read_csv("input/new_psomagen_paths.csv", index_col=False)
+bmc_samples = pd.read_csv("input/bmc_novaseq_paths.csv", index_col=False)
+
+sample_runs = {}
+
+for record in psomagen_samples.to_dict(orient='records'):
+    if record['sample_id'] in sample_runs:
+        sample_runs[record['sample_id']] = sample_runs[record['sample_id']] + [record['run_id']]
+    else:
+        sample_runs[record['sample_id']] = [record['run_id']]
+
+for record in bmc_samples.to_dict(orient='records'):
+    if record['lactinv_sample_id'] in sample_runs:
+        sample_runs[record['lactinv_sample_id']] = sample_runs[record['lactinv_sample_id']] + [record['run_id']]
+    else:
+        sample_runs[record['lactinv_sample_id']] = [record['run_id']]
+
+
+def get_bmc_bams(wildcards):
+    # /n/groups/kwon/data1/sequencing_run_archive_DO_NOT_EDIT/2023_02_02_NovaSeq/230202YilA/D23-115193-2-6110F/230202YilA_D23-115193-2_phiX_bestmap.bam
+    bmc_id = [r for r in bmc_samples.to_dict(orient="records") if r['lactinv_sample_id'] == wildcards.sample_id][0]["bmc_sample_id"]
+    bam_1 = "/n/groups/kwon/data1/sequencing_run_archive_DO_NOT_EDIT/2023_02_02_NovaSeq/230202YilA/{}-1-6110F/230202YilA_{}-1_phiX_bestmap.bam".format(bmc_id, bmc_id)
+    bam_2 = "/n/groups/kwon/data1/sequencing_run_archive_DO_NOT_EDIT/2023_02_02_NovaSeq/230202YilA/{}-2-6110F/230202YilA_{}-2_phiX_bestmap.bam".format(bmc_id, bmc_id)
+    return {"bam_1":bam_1, "bam_2":bam_2}
+
+
+ALL_SAMPLES = sample_runs.keys()
+
+rule target:
+    input:
+        expand("temp/06.combine_filtered_reads/{sample_id}.r.fq", sample_id = list(sample_runs.keys()))
+
+rule prepare_bmc_reads:
+    input:
+        unpack(get_bmc_bams)
+    output:
+        forward_reads_1 = temp("temp/00.prepare_bmc_reads/{run_id}--lane_1_{sample_id}_1.fastq.gz"),
+        forward_reads_2 = temp("temp/00.prepare_bmc_reads/{run_id}--lane_2_{sample_id}_1.fastq.gz"),
+        reverse_reads_1 = temp("temp/00.prepare_bmc_reads/{run_id}--lane_1_{sample_id}_2.fastq.gz"),
+        reverse_reads_2 = temp("temp/00.prepare_bmc_reads/{run_id}--lane_2_{sample_id}_2.fastq.gz"),
+        forward_reads_concat = temp("temp/00.prepare_bmc_reads/{run_id}--{sample_id}_1.fastq.gz"),
+        reverse_reads_concat = temp("temp/00.prepare_bmc_reads/{run_id}--{sample_id}_2.fastq.gz")
+    conda:
+        "envs/picard.yaml"
+    resources:
+        cpus_per_task = 1,
+        mem_mb = 16000,
+        runtime = "8h",
+        partition = "short"
+    shell:
+        """
+        picard SamToFastq -I {input.bam_1} -F {output.forward_reads_1} -F2 {output.reverse_reads_1};
+        picard SamToFastq -I {input.bam_2} -F {output.forward_reads_2} -F2 {output.reverse_reads_2};
+        cat {output.forward_reads_1} {output.forward_reads_2} > {output.forward_reads_concat};
+        cat {output.reverse_reads_1} {output.reverse_reads_2} > {output.reverse_reads_concat};
+        """
+
+
+def get_raw_reads_for_sample(wildcards):
+    forward_reads = ""
+    reverse_reads = ""
+    if wildcards.run_id == "230202YilA": #bmc run with bams
+        forward_reads = "temp/00.prepare_bmc_reads/{}--{}_1.fastq.gz".format(wildcards.run_id, wildcards.sample_id)
+        reverse_reads = "temp/00.prepare_bmc_reads/{}--{}_2.fastq.gz".format(wildcards.run_id, wildcards.sample_id)
+    else:
+        matching_records = [r for r in psomagen_samples.to_dict(orient="records") if (r['sample_id'] == wildcards.sample_id) and (r['run_id'] == wildcards.run_id)]
+        if len(matching_records) != 1:
+            raise
+        forward_reads = matching_records[0]['forward']
+        reverse_reads = matching_records[0]['reverse']
+    return {"forward_reads":forward_reads, "reverse_reads":reverse_reads}
+
+
+
+
+rule cutadapt:
+    input:
+        unpack(get_raw_reads_for_sample)
+    output:
+        forward_reads = "temp/01.cutadapt/{run_id}/{sample_id}_R1_trim.fq.gz",
+        reverse_reads = "temp/01.cutadapt/{run_id}/{sample_id}_R2_trim.fq.gz"
+    conda:
+        "envs/cutadapt.yaml",
+    threads:
+        4
+    resources:
+        cpus_per_task = 4,
+        mem_mb = 4000,
+        runtime = "4h",
+        partition = "short"
+    conda:
+        "envs/cutadapt.yaml"
+    shell:
+        """
+        cutadapt -a CTGTCTCTTAT --cores={threads} \
+                -o {output.forward_reads} \
+                {input.forward_reads};
+        cutadapt -a CTGTCTCTTAT --cores={threads} \
+                -o {output.reverse_reads} \
+                {input.reverse_reads};
+        """
+
+rule sickle:
+    input:
+        forward_reads = rules.cutadapt.output.forward_reads,
+        reverse_reads = rules.cutadapt.output.reverse_reads
+    params:
+        qual=20, # Threshold for trimming based on average quality in a window
+        readlen=50, # Threshold to keep a read based on length after trimming
+    conda:
+        "envs/sickle.yaml",
+    output:
+        forward_reads = "temp/02.sickle/{run_id}/{sample_id}_R1_filt.fq.gz",
+        reverse_reads = "temp/02.sickle/{run_id}/{sample_id}_R2_filt.fq.gz",
+        unpaired_reads = "temp/02.sickle/{run_id}/{sample_id}_filt_unpaired.fq.gz"
+    resources:
+        mem_mb = 4000,
+        runtime = "4h",
+        partition = "short"
+    conda:
+        "envs/sickle.yaml"
+    shell:
+        """
+        sickle pe -f {input.forward_reads} -r {input.reverse_reads} \
+        -t sanger \
+        -o {output.forward_reads} -p {output.reverse_reads} \
+        -s {output.unpaired_reads} \
+        -g -q {params.qual} -l {params.readlen} -x -n;
+        """
+
+rule fastq_to_bam:
+    input:
+        forward_reads = "temp/02.sickle/{run_id}/{sample_id}_R1_filt.fq.gz",
+        reverse_reads = "temp/02.sickle/{run_id}/{sample_id}_R2_filt.fq.gz",
+    output:
+        bam = temp("temp/02.fastqtosam/{run_id}--{sample_id}.bam")
+    conda:
+        "envs/picard.yaml"
+    resources:
+        mem_mb = 4000,
+        runtime = "1h",
+        partition = "short"
+    shell:
+        """
+        picard FastqToSam F1={input.forward_reads} F2={input.reverse_reads} O={output.bam} RG=A SM={wildcards.sample_id}
+        """
+
+rule filter_host_and_quality:
+    input:
+        reads_bam = "temp/02.fastqtosam/{run_id}--{sample_id}.bam",
+        host_kmers = "/n/groups/kwon/joseph/dbs/gatk_tutorial/pathseq_host.bfi",
+        host_img = "/n/groups/kwon/joseph/dbs/gatk_tutorial/pathseq_host.fa.img"
+    output:
+        paired_bam = "temp/03.filter_host/{run_id}--{sample_id}_paired.bam",
+        unpaired_bam = "temp/03.filter_host/{run_id}--{sample_id}_unpaired.bam",
+        metrics = "temp/03.filter_host/{run_id}--{sample_id}_metrics.txt",
+    conda:
+        "envs/gatk.yaml"
+    threads:
+        1
+    resources:
+        cpus_per_task = 1,
+        mem_mb = 40000,
+        runtime = "24h",
+        partition = "medium"
+    shell:
+        """
+        module load java/jdk-1.8u112; gatk PathSeqFilterSpark  \
+        --input {input.reads_bam} \
+        --paired-output {output.paired_bam} \
+        --unpaired-output {output.unpaired_bam} \
+        --min-clipped-read-length 60 \
+        --kmer-file {input.host_kmers} \
+        --filter-bwa-image {input.host_img} \
+        --filter-metrics {output.metrics} \
+        --bam-partition-size 4000000
+        """
+
+rule sam_to_fastq_paired:
+    input:
+        input_bam = "temp/03.filter_host/{run_id}--{sample_id}_paired.bam"
+    output:
+        forward_reads = "temp/04.back_to_fastq/03.filter_host/{run_id}--{sample_id}.f.fq",
+        reverse_reads = "temp/04.back_to_fastq/03.filter_host/{run_id}--{sample_id}.r.fq",
+        unpaired_reads = "temp/04.back_to_fastq/03.filter_host/{run_id}--{sample_id}.unpaired.fq"
+    conda:
+        "envs/picard.yaml"
+    resources:
+        mem_mb = 16000,
+        runtime = "12h",
+        partition = "short"
+    shell:
+        """
+        picard SamToFastq -I {input.input_bam} -F {output.forward_reads} -F2 {output.reverse_reads} -FU {output.unpaired_reads}
+        """
+
+def get_all_filtered_reads(wildcards):
+    return {"forward_reads": ["temp/04.back_to_fastq/03.filter_host/{}--{}.f.fq".format(run_id, wildcards.sample_id) for run_id in sample_runs[wildcards.sample_id]],
+    "reverse_reads": ["temp/04.back_to_fastq/03.filter_host/{}--{}.r.fq".format(run_id, wildcards.sample_id) for run_id in sample_runs[wildcards.sample_id]]}
+
+rule combine_sample_reads_for_ksanity_and_gzip:
+    input:
+        unpack(get_all_filtered_reads)
+    output:
+        forward_reads = "temp/06.combine_filtered_reads/{sample_id}.f.fq",
+        reverse_reads = "temp/06.combine_filtered_reads/{sample_id}.r.fq",
+        combined_reads = "temp/06.combine_filtered_reads/{sample_id}.fq.gz"
+    resources:
+        mem_mb = 1000,
+        runtime = "1h",
+        partition = "short"
+    shell:
+        """
+        module load pigz; 
+        cat {input.forward_reads} > temp/06.combine_filtered_reads/{wildcards.sample_id}.f.fq;
+        cat {input.reverse} > temp/06.combine_filtered_reads/{wildcards.sample_id}.r.fq;
+        cat {input.forward_reads} {input.reverse_reads} > temp/06.combine_filtered_reads/{wildcards.sample_id}.fq; gzip temp/06.combine_filtered_reads/{wildcards.sample_id}.fq;
+        """
+
+rule build_ksanity_reference:
+    input:
+        strain_manifest = "reference_genomes/strains.lst"
+    output:
+        "genomeSignatures_revised.json",
+        "uniqueKmers.json"
+    params:
+        kmer_size=55
+    conda:
+        "envs/ksanity.yaml"
+    resources:
+        mem_mb = 16000,
+        runtime = "12h",
+        partition = "short"
+    shell:
+        "python kSANITY_buildRef.py {input.strain_manifest} {params.kmer_size}"
+
+rule ksanity_reads:
+    input:
+        "temp/06.combine_filtered_reads/{sample_id}.fq.gz"
+    output:
+        "temp/ksanity_reads/{sample_id}.json"
+    params:
+        kmer_size=55
+    conda:
+        "envs/ksanity.yaml"
+    resources:
+        mem_mb = 48000,
+        runtime = "2h",
+        partition = "short"
+    shell:
+        "python kSanityReads.py {input} {params.kmer_size}"
+
+rule ksanity_detectnquant_new:
+    input:
+        reference = "genomeSignatures_revised.json",
+        sample_kmers = "temp/ksanity_reads/{sample_id}.json",
+    output:
+        old_estimate = "output/ksanity/{sample_id}_LBPrelAbund.csv",
+        ctv05_csv = "output/{sample_id}_detected_replicons_ctv05_estimations.csv"
+    conda:
+        "envs/ksanity.yaml"
+    resources:
+        mem_mb = 48000,
+        runtime = "12h",
+        partition = "short"
+    shell:
+        "python kSanityDetectnQuant_JSJE.py {wildcards.sample_id}"
+
+rule fastani:
+    input:
+        reference_paths = "input/reference_genome_paths.txt"
+    output:
+        tsv = "output/lbp_genome_comparisons.tsv"
+    conda:
+        "envs/fastani.yaml"
+    threads:
+        8
+    shell:
+        "fastANI -t {threads} --ql {input.reference_paths} --rl {input.reference_paths} -o {output.tsv}"

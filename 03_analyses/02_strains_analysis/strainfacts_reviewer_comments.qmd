@@ -1,0 +1,912 @@
+---
+title: "strainfacts_figures_for_maintext.qmd"
+format: html
+editor: source
+html:
+  code-fold: true
+---
+
+### Load libraries
+
+```{r}
+#| warning: false
+#| code-fold: true
+
+library(vegan)
+library(tidyverse)
+library(cowplot)
+library(ggalluvial)
+library(microViz)
+library(phyloseq)
+library(ggdendro)
+library(ggbeeswarm)
+library(see)
+library(patchwork)
+library(ggside)
+library(ggstats)
+library(cowplot)
+library(ggtext)
+library(ggrepel)
+library(ggtext)
+library(readxl)
+library(magick)
+theme_set(theme_cowplot(10))
+
+
+```
+
+### Read data and format
+
+Strain 5 from strainfacts is CTV-05 based on jaccard similarity of strain 5's genotype to the metagenoytpe of the short reads from CTV-05 isolate.
+
+```{r}
+#| warning: false
+#| code-fold: true
+
+strainfacts_genotype <- read_tsv("referenced_files/v2_20250227.world.mgen.filt.n300.fit.geno.clean.tsv")
+ctv05_genotype <- read_tsv("referenced_files/LactinV_CTV05_genotypes.tsv", col_names = c("sample", "tax_id", "global_pos", "contig", "local_pos", "ref_nt", "alt_nt", "ref_count", "alt_count")) %>%
+  mutate(sample = str_replace(sample, "lactinv_gtpro_tsvs/temp_06_combine_filtered_reads_", "")) %>%
+  mutate(sample = str_replace(sample, "__gtpro__crisp.tsv.temp", ""))
+
+visit_labels <- tribble(
+    ~visit_name, ~visit_label,
+    "Visit 0", "Pre-MTZ",
+    "Visit 1", "Post-MTZ",
+    "Visit 2", "Week 4",
+    "Visit 3", "Week 8",
+    "Visit 4", "Week 12",
+    "Visit 7", "Week 24"
+) %>%
+    mutate(visit_label = fct_relevel(visit_label, "Pre-MTZ", "Post-MTZ", "Week 4", "Week 8", "Week 12", "Week 24"))
+
+sample_metadata <- read_csv("referenced_files/sample_metadata_for_strainfacts.csv", col_types = "cccccnc") %>% select(-visit_label) %>% inner_join(visit_labels) %>% filter(visit_type == "Planned")
+
+lv2b_samples <- c("LactinV_CTV05", sample_metadata %>% pull(sample))
+
+strainfacts_ra <- read_tsv("referenced_files/v2_20250227.world.mgen.filt.n300.fit.ra.clean.tsv") %>%
+  mutate(sample = str_replace(sample, "lactinv_gtpro_tsvs/temp_06_combine_filtered_reads_", "")) %>%
+  mutate(sample = str_replace(sample, "all_gtpro_tsvs_parsed/temp_06_combine_filtered_reads_", "")) %>%
+  mutate(sample = str_replace(sample, "__gtpro__crisp.tsv.temp", "")) %>% filter(sample %in% lv2b_samples)
+
+expected_genotype_df <- read_tsv("referenced_files/temp_06_combine_filtered_reads_LactinV_CTV05__gtpro__crisp.tsv.temp") %>%
+  mutate(expected_genotype = as.numeric(alt_count > ref_count)) %>% 
+  select(position=global_pos, expected_genotype)
+
+
+# strain 5 is identical to expected genotype
+strainfacts_genotype %>% inner_join(expected_genotype_df) %>%
+  group_by(strain) %>%
+  summarise(jaccard_similarity_to_ctv05 = sum(round(genotype) == expected_genotype)/n()) %>% arrange(desc(jaccard_similarity_to_ctv05))
+
+
+lactinv_estimates <- strainfacts_ra %>%
+  right_join(sample_metadata) %>%
+  mutate(strain = case_when(
+    strain == -1~ "remainder",
+    strain == 5 ~ "CTV-05",
+    .default = str_c("s",str_pad(strain, pad="0", width=2)))) %>%
+  pivot_wider(names_from=strain, values_from=community) %>%
+  arrange(USUBJID, visit_label)
+
+lactinv_estimates_long <- lactinv_estimates %>%
+  pivot_longer(-c(sample, USUBJID, arm, visit_name, visit_type, prop_crisp, visit_label), names_to = "strain", values_to = "rel")
+```
+
+
+
+```{r}
+
+all_genotypes <- list.files("referenced_files/isolate_gtpro/", full.names = TRUE) %>%
+  map_dfr(\(x) read_tsv(x) %>%
+  mutate(expected_genotype = as.numeric(alt_count > ref_count)) %>% 
+  select(position=global_pos, expected_genotype) %>%
+    mutate(isolate = str_extract(x, ("LV2B[^_]+"))))
+
+
+global_trace <- read_excel("referenced_files/2. Global Trace samples - incl site ID, collection date, visit number.xlsx", skip=1)
+  isolation_metadata <- read_csv("referenced_files/lv2b_isolations_bloom.csv", col_types = cols(.default = col_character()))
+  
+subject_metadata<- read_csv("referenced_files/subject_metadata.csv")
+global_visit_key <- tribble(~VISNO, ~visit_name,
+                            "00", "Visit 0",
+                            "01", "Visit 1",
+                            "02", "Visit 2",
+                             "03", "Visit 3",
+                             "04", "Visit 4",
+                             "07", "Visit 7"
+                            )
+connected_isolation_metadata <- isolation_metadata %>%
+  left_join(global_trace, by=c("Source Swab Sample"="SN")) %>%
+  left_join(subject_metadata %>% select(subject_id, USUBJID=usubjid), by=c("PATID"="subject_id")) %>%
+  left_join(global_visit_key) %>%
+  select(Isolate_ID, USUBJID, visit_name) %>%
+  left_join(sample_metadata)
+
+connected_isolation_metadata
+
+```
+
+### L. crispatus distribution
+
+Lactobacillus crispatus' distribution is very bimodal, such that there are many samples >80% L. crispatus, and many samples with >2% L. crispatus. So each 
+
+```{r}
+plot_grid(lactinv_estimates %>%
+    filter(arm == "LACTIN-V") %>%
+    filter(visit_type == "Planned") %>%
+    left_join(visit_labels) %>%
+    select(prop_crisp, visit_label, `CTV-05`, sample) %>%
+  mutate(`CTV-05` = if_else(prop_crisp < 0.05, NA_real_, `CTV-05`)) %>%
+  ggplot(aes(x=prop_crisp)) +
+  geom_histogram(binwidth = 0.025, center=0.0125) +
+  scale_x_continuous("L. crispatus relative abundance\nFull distribution",labels=scales::label_percent(accuracy=0.1))+
+  background_grid(),
+lactinv_estimates %>%
+    filter(arm == "LACTIN-V") %>%
+    filter(visit_type == "Planned") %>%
+    left_join(visit_labels) %>%
+    select(prop_crisp, visit_label, `CTV-05`, sample) %>%
+  mutate(`CTV-05` = if_else(prop_crisp < 0.05, NA_real_, `CTV-05`)) %>%
+  ggplot(aes(x=prop_crisp)) +
+  geom_histogram(binwidth = 0.001, center=0.005) +
+  coord_cartesian(xlim = c(0,0.1)) +
+  scale_x_continuous("L. crispatus relative abundance\n0-10% expanded",labels=scales::label_percent(accuracy=0.01))+
+  background_grid())
+  #scale_x_continuous(trans="pseudo_log")
+```
+
+
+```{r}
+lactinv_estimates %>%
+    filter(visit_type == "Planned") %>%
+    filter(prop_crisp > 0.05) %>%
+    ggplot(aes(x=`CTV-05`)) + 
+    geom_histogram(binwidth = 0.01, center=0.05) +
+  coord_cartesian(xlim = c(0,1)) +
+  scale_x_continuous("CTV-05 expanded",labels=scales::label_percent(accuracy=0.01)) +
+    facet_wrap(~arm) +
+  background_grid()
+    
+```
+
+```{r}
+ctv05_prop_plot <- lactinv_estimates %>%
+    filter(visit_type == "Planned") %>%
+    filter(prop_crisp > 0.05) %>%
+    filter(`CTV-05` <= 1) %>%
+    ggplot(aes(x=`CTV-05`)) + 
+    geom_histogram(binwidth = 0.01, center=0.01/2) +
+  coord_cartesian(xlim = c(0,1)) +
+  scale_x_continuous("CTV-05 proportion in samples\nwith >5% L. crispatus",labels=scales::label_percent(accuracy=1, suffix = ""), breaks=c(0,.10,.25,.50,.75,.90,1)) +
+    facet_wrap(~arm) +
+    geom_vline(xintercept = 0.1, linetype=2) +
+    geom_vline(xintercept = 0.9, linetype=2) +
+  background_grid()
+ctv05_prop_plot
+```
+
+
+```{r}
+lactinv_estimates %>% filter(prop_crisp > 0.05) %>%
+  select(1,8:57) %>%
+  pivot_longer(-sample) %>%
+  mutate(bt75 = between(value, 0.075,0.1),bt10 = between(value, 0.1,0.125)) %>% dplyr::count(bt75, bt10)
+
+
+lactinv_estimates %>%distinct(sample, prop_crisp) %>% mutate(bt25 = between(prop_crisp, 0.025, 0.075)) %>% dplyr::count(bt25)
+
+```
+
+
+```{r}
+
+layer_data(ctv05_prop_plot) %>%  as_tibble() %>% filter(xmin <0.2, xmin > 0.1) %>% select(xmin, xmax, count, PANEL) %>% 
+  mutate(label = str_c(xmin, "-",xmax)) %>%
+  select(ctv05_bin=label, n_samples = count, PANEL)
+```
+
+```{r}
+lactinv_estimates %>%
+    filter(arm == "LACTIN-V") %>%
+    filter(visit_type == "Planned") %>%
+    left_join(visit_labels) %>%
+  mutate(`CTV-05` = if_else(prop_crisp < 0.05, NA_real_, `CTV-05`)) %>%
+  ggplot(aes(y=prop_crisp, x=visit_label)) +
+  geom_boxplot(outliers = FALSE) +
+  geom_quasirandom(alpha=0.25, size=2) +
+  facet_wrap(~arm) +
+  scale_y_continuous("L. crispatus relative abundance",labels=scales::label_percent(accuracy=0.1))+
+  background_grid()
+
+
+```
+
+
+Here's the number of samples that'd be over the threshold with 2.5% vs 5% vs 7.5% . 
+
+```{r}
+lactinv_estimates %>%
+    filter(arm == "LACTIN-V") %>%
+    filter(visit_type == "Planned") %>%
+    left_join(visit_labels) %>%
+    select(prop_crisp, visit_label, `CTV-05`, sample) %>%
+  mutate(`CTV-05` = if_else(prop_crisp < 0.05, NA_real_, `CTV-05`)) %>%
+  summarise(`2.5% cutoff`= sum(prop_crisp > 0.025),
+  `5% cutoff`= sum(prop_crisp > 0.05),
+  `7.5% cutoff`= sum(prop_crisp > 0.075)) %>%
+    mutate(label = "Number of samples greater than cutoff", .before = 1) %>%
+    gt::gt()
+
+```
+
+```{r}
+lactinv_estimates %>%
+    filter(arm == "LACTIN-V") %>%
+    filter(visit_type == "Planned") %>%
+    left_join(visit_labels) %>%
+    select(prop_crisp, visit_label, `CTV-05`, sample) %>%
+  mutate(`CTV-05` = if_else(prop_crisp < 0.05, NA_real_, `CTV-05`)) %>%
+  summarise(`2.5% cutoff`= sum(prop_crisp > 0.025),
+  `5% cutoff`= sum(prop_crisp > 0.05),
+  `7.5% cutoff`= sum(prop_crisp > 0.075)) %>%
+    mutate(label = "Number of samples greater than cutoff", .before = 1) %>%
+    gt::gt()
+```
+
+
+
+### Sankey plot
+
+```{r}
+#| warning: false
+#| code-fold: true
+#| fig-width: 7
+#| fig-height: 10
+sankey_strains <- lactinv_estimates %>%
+    #filter(arm == "LACTIN-V") %>%
+    filter(visit_type == "Planned") %>%
+    left_join(visit_labels) %>%
+    mutate(pct_ctv05 = `CTV-05`) %>%
+    mutate(ctv05_category = case_when(
+        prop_crisp > 0.05 & is.na(pct_ctv05) ~ "≥5% L. crispatus, unable to estimate strain",
+        prop_crisp > 0.05 & pct_ctv05 > 0.9 ~ ">90% CTV-05",
+        prop_crisp > 0.05 & pct_ctv05 >= 0.1 & pct_ctv05 <= 0.9 ~ "10-90% CTV-05",
+        prop_crisp > 0.05 & pct_ctv05 <= 0.1 ~ "<10% CTV-05",
+        prop_crisp <= 0.05  ~ "<5% total L. crispatus (strains undetermined)"
+    )) %>%
+    mutate(ctv05_category = fct_relevel(ctv05_category,  "≥5% L. crispatus, unable to estimate strain",
+ ">90% CTV-05",
+ "10-90% CTV-05",
+ "<10% CTV-05",
+ "<5% total L. crispatus (strains undetermined)")) %>%
+    select(ctv05_category, USUBJID, arm, visit_label) %>%
+        ggplot(aes(x = visit_label, stratum = ctv05_category, alluvium = USUBJID, fill = ctv05_category, label = ctv05_category)) +
+        geom_flow(reverse=TRUE, width = 0.21) +
+        geom_stratum(aes(fill = ctv05_category),reverse=TRUE, alpha=0.95, color="#FFFFFF00", width = 0.4) +
+        geom_text(stat="stratum", aes(label=after_stat(count))) + #aes(label = after_stat(if_else(count>3, count, NA_real_))), size=2.5) +
+        facet_wrap(~arm, nrow=2, ncol=1, scales="free_y") +
+        scale_x_discrete("") +
+  scale_y_continuous("Number of participants") +
+        scale_fill_manual("", values=c("≥5% L. crispatus, unable to estimate strain" = "#009E73", ">90% CTV-05"="#D55E00", "10-90% CTV-05"="#E69F00", "<10% CTV-05"="#F0E442", "<5% total L. crispatus (strains undetermined)"="#999999")) +
+  guides(fill=guide_legend(reverse=TRUE, nrow = 3)) +
+        theme_cowplot(12) +
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank(), axis.text.x = element_text(angle = 45, hjust = 1),axis.line = element_blank(),  panel.border = element_rect(fill=NA,color="black", size=0.5, 
+                                    linetype="solid"), legend.position = "bottom")+
+  labs(tag="A")
+
+sankey_strains
+```
+
+
+### Contigency table of strain stability
+
+```{r}
+#| warning: false
+#| code-fold: true
+#| fig-width: 11.5
+#| fig-height: 5
+
+stability_table <- lactinv_estimates_long %>%
+  group_by(USUBJID, strain) %>%
+  arrange(visit_label) %>%
+  filter(visit_label %in% c("Week 4", "Week 8", "Week 12", "Week 24")) %>% # only look at timepoints after week 4
+  filter(prop_crisp < 0.05 | !is.na(rel)) %>% # only look at timepoints where strainfacts was able to make a call with our sequencing data or crispatus was less than 5%
+  mutate(detected = case_when(
+    prop_crisp >= 0.05 & rel >= 0.1 ~ "Detected",
+    prop_crisp >= 0.05 & rel < 0.1 ~ "Not Detected",
+    prop_crisp < 0.05  ~ "L. crisp < 5%"
+  )) %>%
+    mutate(next_detected = lead(detected)) %>%
+    mutate(rel = if_else(detected != "Detected", 0.0125, rel)) %>% # for plotting, set low rel to 0.05%
+    mutate(next_rel = lead(rel)) %>%
+    filter(any(detected == "Detected")) %>% # only look at strains that are detected within a person at least once after dosing starts
+    filter(as.numeric(visit_label) + 1 == lead(as.numeric(visit_label))) %>% # only look at timepoints that have a following consecutive timepoint
+    ungroup() %>%
+    mutate(detected = fct_relevel(detected, "Detected", "Not Detected", "L. crisp < 5%") %>% fct_rev()) %>%
+    mutate(next_detected = fct_relevel(next_detected, "Detected", "Not Detected", "L. crisp < 5%") %>% fct_rev())
+  
+
+contigency_strains <- stability_table %>%
+  mutate(strain_label = if_else(strain %in% c("CTV-05","remainder"), strain, "Native strains")) %>%
+  filter(!(strain_label == "CTV-05" & arm == "Placebo")) %>%
+  mutate(facet_label = fct_inorder(str_c("Arm: ", arm,"\n", strain_label))) %>%
+    ggplot(aes(x=detected, y=next_detected)) +
+    geom_tile(aes(fill=after_stat(prop), group=detected), alpha=0.5,  stat="sum", height=1, width=0.9) +
+    guides(
+    fill  = guide_legend(title = "Proportion in column"),
+    size = guide_none(),
+  ) +
+    geom_text(aes(label=str_c(after_stat(n),"\n(", scales::label_percent(1)(after_stat(prop)), ")"),  group=detected), color="black", size=4, stat="sum") +
+    colorspace::scale_fill_continuous_sequential(palette = "SunsetDark") +
+    facet_wrap(~facet_label) +
+    scale_x_discrete("Status at t") +
+    scale_y_discrete("Status at t + 1") +
+  theme_cowplot(12) +
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust=1)) +
+  labs(tag="D")
+    
+    
+contigency_strains
+```
+
+
+```{r}
+
+next_visits <- tribble(
+    ~visit_label, ~next_visit,
+    "Pre-MTZ",    "Post-MTZ",
+    "Post-MTZ",    "Week 4",
+    "Week 4",    "Week 8",
+    "Week 8",    "Week 12",
+    "Week 12",    "Week 24",
+    "Week 24", NA_character_,
+) %>%
+    mutate(visit_label = fct_relevel(visit_label, "Pre-MTZ", "Post-MTZ", "Week 4", "Week 8", "Week 12", "Week 24")) %>%
+  mutate(next_visit =fct_relevel(next_visit, "Pre-MTZ", "Post-MTZ", "Week 4", "Week 8", "Week 12", "Week 24"))
+
+ctv05_rel_for_sorting <- lactinv_estimates_long %>%
+  filter(strain == "CTV-05") %>%
+  select(sample, prop_crisp, ctv05_rel=rel) %>% mutate(ctv05_rel_for_sorting = case_when(
+    prop_crisp < 0.05 ~ -1,
+    ctv05_rel > 0.999~ 1,
+    ctv05_rel < 0.001 ~ 0,
+    is.na(ctv05_rel) ~ -1,
+    .default=ctv05_rel))
+ctv05_rel_for_sorting
+
+summarised_native_strain_rel <- lactinv_estimates_long %>%
+  group_by(sample) %>%
+  mutate(strain_type = if_else(all(is.na(rel)) | prop_crisp < 0.05, "undetermined", "strain")) %>%
+  filter(row_number() == 1 | !is.na(rel)) %>%
+  mutate( rel = if_else(is.na(rel), 1, rel)) %>%
+  ungroup() %>%
+  mutate(strain_type =case_when(
+     strain_type == "undetermined" ~ "undetermined", 
+     strain == "CTV-05" ~ "CTV-05",
+     .default = "native strain")) %>%
+    group_by(sample, USUBJID, arm, visit_label, strain_type, prop_crisp) %>%
+  summarise(rel = sum(rel))
+
+non_lc_rel <- summarised_native_strain_rel %>% distinct(sample, prop_crisp) %>%
+  mutate(strain_type = "non_lc", rel = 1-prop_crisp) %>%
+  select(-prop_crisp) %>%
+  left_join(distinct(lactinv_estimates_long, sample, USUBJID, arm, visit_label, prop_crisp))
+
+pairings <- summarised_native_strain_rel %>%
+  filter(arm == "LACTIN-V") %>%
+  filter(!(prop_crisp > 0.05 & strain_type == "undetermined")) %>%
+  distinct(sample, USUBJID, visit_label) %>%
+  group_by(USUBJID) %>%
+  filter(visit_label %in% c("Week 4", "Week 8", "Week 12", "Week 24")) %>%
+  arrange(USUBJID, visit_label) %>%
+  mutate(next_visit = lead(visit_label), next_sample = lead(sample)) %>%
+  filter(as.numeric(visit_label) + 1 == as.numeric(next_visit)) %>%
+  ungroup() %>%
+  mutate(pairing = str_c("p", row_number())) %>%
+  select(sample, visit_label, next_sample, pairing) %>%
+  left_join(ctv05_rel_for_sorting, by=c("next_sample" = "sample")) %>%
+  mutate(pairing_fct = fct_reorder2(as.character(pairing), visit_label, ctv05_rel_for_sorting)) %>%
+  select(before=sample, after=next_sample, pairing_fct) %>%
+  pivot_longer(c(before, after), names_to = "sample_which", values_to = "sample") 
+
+
+
+pairing_category <- pairings %>%
+  filter(sample_which == "before") %>%
+  left_join(
+    ctv05_rel_for_sorting
+  ) %>%
+  mutate(category = case_when(
+    prop_crisp < 0.05 ~ "<5% L. crispatus",
+    is.na(ctv05_rel) ~ "this is a bug", # no samples with >0.05 crisp and NA ctv05 rel should be in table
+    ctv05_rel >= 0.9 ~ "High CTV-05",
+    ctv05_rel < 0.9 & ctv05_rel > 0.1 ~ "Mix",
+    ctv05_rel <= 0.1 ~ "Low")) %>%
+  mutate(category = fct_relevel(category, "High CTV-05", "Mix", "Low", "<5% L. crispatus")) %>%
+  select(pairing_fct, category)
+
+before_crisp_plot <- pairings %>% filter(sample_which == "before") %>%
+  left_join(ctv05_rel_for_sorting) %>%
+  left_join(pairing_category) %>%
+  mutate(dummy = " ") %>%
+  ggplot(aes(x=pairing_fct, fill=prop_crisp, y=1)) +
+  geom_tile() +
+  facet_grid(dummy~category, scales="free", space="free") +
+  colorspace::scale_fill_continuous_sequential(palette = "Oranges", p1=1, p2=0.5, name="L. crispatus\n16S proportion") +
+    theme(strip.text = element_text(size = 12), axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), plot.margin = unit(c(0, 1, 0, 1), "cm")) +
+    scale_x_discrete("")  +
+  scale_y_continuous("") + labs(tag = "F")
+
+visit_strip_plot <- pairings %>% filter(sample_which == "before") %>%
+  left_join(sample_metadata %>% select(sample, visit_label)) %>%
+  left_join(pairing_category) %>%
+  mutate(dummy = " ") %>%
+  ggplot(aes(x=pairing_fct, fill=visit_label, y=1)) +
+  geom_tile() +
+  facet_grid(dummy~category, scales="free", space="free") +
+  scale_fill_manual(values=c("Week 4"="#56B4E9","Week 8"="#612B8F", "Week 12"="#CC79A7"), name="Visit time t") +
+  theme(strip.text.x = element_blank(), strip.text.y = element_text(size = 12), strip.background.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.text.y=element_blank(), legend.title =element_markdown(), axis.ticks.y=element_blank(), plot.margin = unit(c(0, 1, 0, 1), "cm")) +
+    scale_x_discrete("")  +
+  scale_y_continuous("")
+
+after_crisp_plot <- pairings %>% filter(sample_which == "after") %>%
+  left_join(ctv05_rel_for_sorting) %>%
+  left_join(pairing_category) %>%
+  mutate(dummy = " ") %>%
+  ggplot(aes(x=pairing_fct, fill=prop_crisp, y=1)) +
+  geom_tile(show.legend = FALSE) +
+  facet_grid(dummy~category, scales="free", space="free") +
+  colorspace::scale_fill_continuous_sequential(palette = "Oranges", p1=1, p2=0.5, name="*L. crispatus* <br>16S proportion") +
+  theme(strip.text.x = element_blank(), strip.text.y = element_text(size = 12), strip.background.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.text.y=element_blank(), legend.title =element_markdown(), axis.ticks.y=element_blank(), plot.margin = unit(c(0, 1, 0, 1), "cm")) +
+    scale_x_discrete("")  +
+  scale_y_continuous("")
+
+
+transition_plot <- pairings %>% left_join(
+  bind_rows(summarised_native_strain_rel)
+) %>%
+  left_join(pairing_category) %>%
+  mutate(sample_which = case_when(sample_which == "before" ~ "Visit t", sample_which == "after" ~ "Visit t+1") %>% fct_relevel("Visit t", "Visit t+1")) %>%
+  mutate(Strain = strain_type) %>%
+
+  ggplot(aes(x=pairing_fct, y=rel, fill=Strain, color=Strain)) +
+  geom_col(position="stack") +
+  facet_grid(cols=vars(category), rows=vars(sample_which), scales="free_x", space="free") +
+      scale_fill_manual(values=c("undetermined" = "#999999", "CTV-05"="#D55E00", "native strain"="#E6DE81")) +
+      scale_color_manual(values=c("undetermined" = "#999999", "CTV-05"="#D55E00", "native strain"="#E6DE81")) +
+  scale_y_continuous("Strain proportion of *L. crispatus*", labels = scales::label_percent()) +
+  scale_x_discrete("") +
+  theme(strip.text.x = element_blank(), strip.text.y = element_text(size = 12), strip.background.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank(),axis.title.y = element_markdown(), plot.margin = unit(c(0, 1, 0, 1), "cm"))
+
+
+composite_plot <-(before_crisp_plot /visit_strip_plot / transition_plot / after_crisp_plot) +
+  plot_layout(ncol = 1, heights = c(1,1,10,1))
+composite_plot
+```
+
+```{r visit_strip_plot}
+visit_strip_plot
+```
+
+### pie chart
+
+```{r}
+
+pairing_after_category <- pairings %>%
+  filter(sample_which == "after") %>%
+  left_join(
+    ctv05_rel_for_sorting
+  ) %>%
+  mutate(after_category = case_when(
+    prop_crisp < 0.05 ~ "<5% L. crispatus",
+    is.na(ctv05_rel) ~ "this is a bug", # no samples with >0.05 crisp and NA ctv05 rel should be in table
+    ctv05_rel >= 0.9 ~ "High CTV-05",
+    ctv05_rel < 0.9 & ctv05_rel > 0.1 ~ "Mix",
+    ctv05_rel <= 0.1 ~ "Low")) %>%
+  mutate(after_category = fct_relevel(after_category, "High CTV-05", "Mix", "Low", "<5% L. crispatus")) %>%
+  select(pairing_fct, after_category)
+
+
+pie_chart_data <- pairings %>% 
+  distinct(pairing_fct) %>%
+  left_join(pairing_category) %>%
+  left_join(pairing_after_category) %>%
+  ungroup() %>%
+  dplyr::count(category, after_category) %>%
+  select(category, transition = after_category, count=n)
+
+pie_chart <- pie_chart_data %>%
+  mutate(transition = fct_relevel(transition,"High CTV-05", "Mix", "Low", "<5% L. crispatus" )) %>%
+  mutate(category = fct_relevel(category,"High CTV-05", "Mix", "Low", "<5% L. crispatus" )) %>%
+  group_by(category) %>%
+  mutate(csum = rev(cumsum(rev(count))), 
+        pos = (count/2 + lead(csum, 1))/sum(count),
+        pos = if_else(is.na(pos), (count/2)/sum(count), pos),
+        percentage = count/sum(count)) %>%
+  ggplot(aes(x="", y=count, fill=transition)) +
+  geom_col(position="fill") +
+  facet_wrap(~category, ncol=2, nrow=2) +
+  geom_label_repel(aes(y = pos,
+                  label = glue::glue("{count} ({scales::percent(percentage, accuracy=1)})"), 
+                  fill = transition),
+              size = 3,
+              nudge_x = 0.5,
+              show.legend = FALSE) +
+  scale_fill_manual(values = c("High CTV-05"="#D55E00", "Mix"="#E69F00", "Low"="#F0E442", "<5% L. crispatus"="#999999")) +
+  theme_void() +
+    guides(
+    fill  = guide_legend(title = "Transition visit t+1", ncol=2)) +
+  theme(legend.position="top") +
+  coord_polar(theta = "y") +
+
+  labs(tag="G")
+pie_chart
+```
+
+
+```{r pie_chart_extended}
+#| fig-width: 8
+#| fig-height: 8
+
+pie_chart_data_extended <- pairings %>% 
+  left_join(sample_metadata %>% select(sample, visit_label)) %>%
+  filter(sample_which == "before") %>%
+  distinct(pairing_fct, visit_label) %>%
+  left_join(pairing_category) %>%
+  left_join(pairing_after_category) %>%
+  ungroup() %>%
+  dplyr::count(visit_label, category, after_category) %>%
+  select(visit_label, category, transition = after_category, count=n)
+
+pie_chart_extended <- pie_chart_data_extended %>%
+  mutate(transition = fct_relevel(transition,"High CTV-05", "Mix", "Low", "<5% L. crispatus" )) %>%
+  mutate(category = fct_relevel(category,"High CTV-05", "Mix", "Low", "<5% L. crispatus" )) %>%
+  group_by(category, visit_label) %>%
+  mutate(csum = rev(cumsum(rev(count))), 
+        pos = (count/2 + lead(csum, 1))/sum(count),
+        pos = if_else(is.na(pos), (count/2)/sum(count), pos),
+        percentage = count/sum(count)) %>%
+  ungroup() %>%
+  mutate(visit_transition_label = 
+  case_when(
+    visit_label == "Week 4" ~ "Week\n4 to 8",
+    visit_label == "Week 8" ~ "Week\n8 to 12",
+    visit_label == "Week 12" ~ "Week\n12 to 24",
+  )) %>%
+    mutate(visit_transition_label = fct_relevel(visit_transition_label, "Week\n4 to 8", "Week\n8 to 12", "Week\n12 to 24")) %>%
+  ggplot(aes(x="", y=count, fill=transition)) +
+  geom_col(position="fill") +
+  facet_grid(rows=vars(visit_transition_label), cols=vars(category)) +
+  geom_label_repel(aes(y = pos,
+                  label = glue::glue("{count} ({scales::percent(percentage, accuracy=1)})"), 
+                  fill = transition),
+              size = 3,
+              nudge_x = 0.5,
+              show.legend = FALSE) +
+  scale_fill_manual(values = c("High CTV-05"="#D55E00", "Mix"="#E69F00", "Low"="#F0E442", "<5% L. crispatus"="#999999")) +
+  theme_void() +
+    guides(
+    fill  = guide_legend(title = "Transition visit t+1", ncol=2)) +
+  theme(legend.position="bottom") +
+  coord_polar(theta = "y")
+pie_chart_extended
+
+ggsave("pie_chart_extended.pdf", pie_chart_extended, width=9, height=9)
+
+```
+
+### Native Strain counts
+
+```{r}
+native_strains <- lactinv_estimates_long %>%
+  filter(strain != "CTV-05", rel > 0.1, prop_crisp > 0.05) %>%
+  distinct(strain, USUBJID, arm)
+
+participant_native_strain_status <- lactinv_estimates_long %>% semi_join(native_strains) %>%
+  group_by(USUBJID) %>%
+  filter(rel > 0.1, prop_crisp > 0.05) %>%
+  group_by(USUBJID, visit_label) %>%
+  summarise(cooccur = if_else(sum(between(rel, 0.1, 0.9))>1, "co-occur", "exclusive")) %>%
+  ungroup() %>%
+  group_by(USUBJID) %>%
+  summarise(`Co-occurence` = case_when(
+    all(cooccur == "exclusive") ~ "never co-occur",
+    all(cooccur == "co-occur") & n() > 1 ~ "always co-occur",
+    any(cooccur == "co-occur") & n() > 1 ~ "sometimes co-occur",
+    n() == 1 ~ "only one timepoint"
+  ))
+
+
+summary_strain_cooccurence <- native_strains %>% group_by(USUBJID, arm) %>%
+  summarise(n_strains = n_distinct(strain)) %>%
+  left_join(participant_native_strain_status) %>%
+  bind_rows(lactinv_estimates %>% anti_join(participant_native_strain_status) %>%
+  distinct(USUBJID, arm) %>% mutate(n_strains = 0, `Co-occurence` = "never co-occur"))
+
+cooccurence_plot <- summary_strain_cooccurence %>%
+  ggplot(aes(x=n_strains)) +
+  geom_bar(position="stack") +
+  stat_count(
+    data = . %>% filter(arm == "Placebo"),
+    geom = "text", colour = "black", size = 3.5,
+    aes(label = str_c(after_stat(count), "\n", scales::label_percent(accuracy = 0.1)(after_stat(prop)))),
+    position = position_nudge(y = 7)
+  ) +
+  stat_count(
+    data = . %>% filter(arm != "Placebo"),
+    geom = "text", colour = "black", size = 3.5,
+    aes(label = str_c(after_stat(count), "\n", scales::label_percent(accuracy = 0.1)(after_stat(prop)))),
+    position = position_nudge(y = 14)
+  ) +
+  facet_wrap(~arm, ncol=1, scales="free_y") +
+  scale_y_continuous("Number of participants", expand = expansion(mult=c(0,0.3))) +
+  theme_cowplot(10) +
+  theme(legend.position = "bottom") +
+  background_grid(major="y")+
+  scale_x_continuous("Number of non-CTV-05 lineages") +
+  labs(tag = "B")
+```
+
+
+
+```{r}
+strain_trajectory_example <- lactinv_estimates_long %>% filter(USUBJID == "STI.00625") %>% group_by(strain) %>% filter(any(rel > 0.1)) %>% ungroup() %>%
+  mutate(USUBJID = str_c("Participant ", USUBJID)) %>%
+  mutate(scaled_rel = rel*prop_crisp) %>%
+  ungroup() %>%
+  mutate(`Inferred strain` = str_replace(strain,"s", "Strain ")) %>%
+  ggplot(aes(x=visit_label, y=scaled_rel, fill=`Inferred strain`)) +
+  geom_col(data = lactinv_estimates_long %>% filter(USUBJID == "STI.00625") %>% distinct(visit_label) %>% mutate(scaled_rel=1), fill="#cccccc") +
+  geom_col(position="stack") +
+  scale_y_continuous("Microbiota relative abundance", labels=scales::label_percent()) +
+  facet_wrap(~USUBJID) +
+  scale_fill_manual(values=c("CTV-05"="#D55E00", "Strain 14"="#56B4E9")) +
+  theme(axis.title.y = element_markdown(),axis.text.x = element_text(angle=45, vjust = 1, hjust=1)) +
+  scale_x_discrete("")+ labs(tag = "C")
+
+strain_trajectory_example
+```
+
+
+```{r}
+
+isolates_of_interest <- connected_isolation_metadata %>% filter(USUBJID == "STI.00625") %>%
+  filter(visit_label %in% c("Week 8", "Week 12", "Week 24")) 
+  
+
+all_jaccard_isolates <- all_genotypes %>% group_by(isolate) %>% filter(n() > 20000) %>% ungroup() %>% semi_join(isolates_of_interest, by=c("isolate" = "Isolate_ID")) %>% 
+left_join(strainfacts_genotype %>% filter(strain != -1)) %>%
+  group_by(strain, isolate) %>%
+  summarise(jaccard = sum(round(genotype) == expected_genotype)/n()) %>% arrange(desc(jaccard))
+
+  
+
+
+similarity_plot <- all_jaccard_isolates %>% left_join(isolates_of_interest, by=c("isolate" = "Isolate_ID")) %>%
+  filter(isolate %in% c("LV2B000059","LV2B000155","LV2B000074","LV2B000157")) %>%
+  group_by(isolate) %>%
+  mutate(Strain = case_when(
+    strain == 5 & jaccard == max(jaccard) ~ "CTV-05",
+    strain == 14 & jaccard == max(jaccard)  ~ "Strain 14",
+    .default = "other inferred strain"
+  ) ) %>%
+  ungroup() %>% mutate(Strain =fct_relevel(Strain, "CTV-05", "Strain 14","other inferred strain")) %>%
+  
+  mutate(Isolate = str_c(visit_label, isolate, sep="\n")) %>%
+  mutate(Isolate = fct_reorder(Isolate, as.numeric(visit_label)) %>% fct_rev()) %>%
+  ggplot(aes(x=jaccard, y=Isolate)) +
+  geom_quasirandom(aes(color=Strain, shape=Strain, size=Strain), width=0.5) +
+  scale_color_manual(values=c("CTV-05"="#D55E00", "Strain 14"="#56B4E9", "other inferred strain"="#999999"))+
+  scale_shape_manual(values=c("CTV-05"=18, "Strain 14"=18, "other inferred strain"=16)) +
+ scale_size_manual(values=c("CTV-05"=3, "Strain 14"=3, "other inferred strain"=1.5)) +
+  scale_x_continuous("Similarity to inferred genotype") +
+  background_grid(major = c("x"))+ labs(tag = "E") +
+  guides(
+  shape = guide_legend(ncol = 1),
+  color = guide_legend(ncol = 1),
+  size = guide_legend(ncol = 1)
+) +
+  theme(legend.position = "top")
+
+```
+
+
+```{r reorganize_figure}
+#| fig-width: 12
+#| fig-height: 14
+# Read an image
+img <- image_read("referenced_files/isolate_plate.png")
+
+# Convert image to a ggplot object
+img_plot <- image_ggplot(img) + labs(tag = "D")
+
+pie_chart_wrapped <- pie_chart + theme(plot.margin = margin(-10, -10, -10, -10))
+
+
+composed_plot <- (((sankey_strains | free(cooccurence_plot, type = "label")) | (strain_trajectory_example / ( img_plot + similarity_plot))) + plot_layout(tag_level = "new", widths=c(2,1.2,2))) /
+   (( (composite_plot | wrap_plots(pie_chart_wrapped))) + plot_layout(widths=c(1.8,1))) + plot_layout(heights = c(1,0.75))
+save_plot("composed_plot.pdf", base_height = 14, base_width = 12, plot=composed_plot)
+```
+
+
+## Main text numbers
+```{r}
+
+# number of samples for strainfacts
+
+sample_metadata %>% filter(prop_crisp > 0.05) # 343 rowshave crispatus > 5%
+
+
+strainfacts_ra %>% distinct(sample) %>% semi_join(sample_metadata %>% filter(prop_crisp > 0.05)) # 313 samples successful strainfacts
+
+strainfacts_ra %>% 
+  filter(strain != -1) %>%
+  group_by(strain) %>%
+  filter(sum(community > 0.1) > 1) %>%
+  ungroup() %>%
+  distinct(strain) # 31 strains
+
+sample_metadata %>%
+  filter(prop_crisp > 0.05) %>%
+  filter(arm == "Placebo" | visit_label %in% c("Pre-MTZ", "Post-MTZ")) %>%
+  semi_join(strainfacts_ra %>% distinct(sample)) %>%
+  left_join(strainfacts_ra %>% filter(strain == 5)) %>% count(community > 0.1) # 5 samples / 57 
+
+sample_metadata %>%
+  filter(prop_crisp > 0.05) %>%
+  filter(arm == "Placebo" | visit_label %in% c("Pre-MTZ", "Post-MTZ")) %>%
+  semi_join(strainfacts_ra %>% distinct(sample)) %>%
+  left_join(strainfacts_ra %>% filter(strain == 5)) %>%
+  filter(community > 0.1) %>%
+  distinct(USUBJID) # 5 unique participants
+
+```
+
+
+```{r}
+sample_metadata %>%
+  filter(prop_crisp > 0.05) %>%
+  filter(arm == "LACTIN-V" & visit_label %in% c("Week 4", "Week 24")) %>%
+  semi_join(strainfacts_ra %>% distinct(sample)) %>%
+  left_join(strainfacts_ra %>% filter(strain == 5)) %>% dplyr::count(visit_label) # 5 samples / 57 
+
+
+strainfacts_ra %>% left_join(sample_metadata) %>%
+  filter(prop_crisp > 0.05) %>%
+  filter(community > 0.1) %>% filter(strain != 5) %>% 
+  group_by(strain) %>%
+  summarise(n_participants = n_distinct(USUBJID)) %>%
+  ungroup() %>%
+  filter(n_participants == max(n_participants))
+
+```
+
+
+```{r}
+global_visit_key <- tribble(~VISNO, ~visit_name,
+                            "00", "Visit 0",
+                            "01", "Visit 1",
+                            "02", "Visit 2",
+                             "03", "Visit 3",
+                             "04", "Visit 4",
+                             "07", "Visit 7"
+                            )
+
+
+ctv05_assignments <- read_tsv("referenced_files/LV2b_lc_isolates_dists_to_ctv05_2023_09_04.tsv")
+isolation_taxonomy_assignments <- read_tsv("referenced_files/LV2b_isolations_gtdb_assignments.tsv")
+barcode_metadata <- read_excel("referenced_files/2. Global Trace samples - incl site ID, collection date, visit number.xlsx", skip = 1)
+bloom_isolations <- read_csv("referenced_files/lv2b_isolations_bloom.csv")
+subject_metadata <- read_csv("referenced_files/subject_metadata.csv") 
+
+isolation_intermediate_metadata <- bloom_isolations %>%
+  mutate(`Source Swab Sample` = as.character(`Source Swab Sample`)) %>%
+  left_join(
+  barcode_metadata %>%
+  left_join(subject_metadata, by=c("PATID"="subject_id")),
+by=c("Source Swab Sample"="SN")
+) %>%
+  left_join(global_visit_key)
+
+lactin_v_estimates_subset <-   lactinv_estimates_long %>%
+  filter(strain == "CTV-05") %>%
+  distinct(USUBJID, arm, visit_name,prop_crisp,visit_label,strain,rel) %>%
+  semi_join(isolation_intermediate_metadata, by=c("USUBJID"="usubjid", "visit_name"="visit_name"))
+
+isolation_table <- 
+  isolation_intermediate_metadata %>%
+  left_join( lactin_v_estimates_subset, by=c("usubjid"="USUBJID", "visit_name"="visit_name"))  %>%
+  left_join(isolation_taxonomy_assignments, by=c("Isolate_ID"="user_genome"))
+
+```
+
+
+```{r}
+
+# Add scale_x_discrete with position="top" and remove x-axis elements from other plots
+prop_crisp_plot <- lactin_v_estimates_subset %>%
+  ggplot(aes(x=visit_label, fill=prop_crisp, y="% L. crispatus in sample")) +
+  geom_tile(show.legend = FALSE) +
+    geom_label(aes(label = ifelse(is.na(prop_crisp), "NA", scales::label_percent(accuracy=1)(prop_crisp))), 
+            color = "black",fill="#FFFFFFCC", size = 3) +
+  scale_x_discrete("", position = "top") +  # Move x-axis to top
+  colorspace::scale_fill_continuous_sequential(palette="Peach", labels=scales::label_percent(), name="Proportion L. crispatus",    guide = guide_colorbar(
+      barheight = unit(1.3, "cm"),      # Make colorbar shorter
+      barwidth = unit(0.3, "cm"),       # Make colorbar thinner
+      title.position = "top",           # Put title above bar
+      title.hjust = 0.5                 # Center the title
+    )) +
+  facet_grid(cols = vars(USUBJID), space="free", scales="free_x", drop = TRUE) +
+  theme(
+    axis.line.y = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+prop_ctv05_plot <- lactin_v_estimates_subset %>%
+  ggplot(aes(x=visit_label, fill=rel,y="% L.c. that is CTV-05")) +
+  geom_tile(show.legend = FALSE) +
+  # Add text labels for NA values
+  geom_label(aes(label = ifelse(is.na(rel), "NA", scales::label_percent(accuracy=1)(rel))), 
+            color = "black",fill="#FFFFFFCC", size = 3) +
+  colorspace::scale_fill_continuous_sequential(palette="YlOrRd", labels=scales::label_percent(), name="Proportion CTV-05",    guide = guide_colorbar(
+      barheight = unit(1.3, "cm"),      # Make colorbar shorter
+      barwidth = unit(0.3, "cm"),       # Make colorbar thinner
+      title.position = "top",           # Put title above bar
+      title.hjust = 0.5                 # Center the title
+    )) +
+  facet_grid(cols = vars(USUBJID), space="free", scales="free_x", drop = TRUE) +
+  theme(
+    axis.line.y = element_blank(),
+    axis.title.y = element_blank(),
+    # Remove x-axis elements and facet labels
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+    strip.text = element_blank()  # Remove facet labels
+  )
+
+
+taxonomy_fix <- tribble(
+  ~taxon, ~taxon_fix,
+  "Bifidobacterium vaginale", "Gardnerella vaginalis",
+  "Bifidobacterium swidsinskii", "Gardnerella swidsinskii",
+)
+
+isolation_numbers <- isolation_table %>% 
+  left_join(ctv05_assignments, by=c("Isolate_ID" = "isolate")) %>%
+  mutate(taxon = case_when(
+    classification == "Unclassified Bacteria" ~ "Unclassified Bacteria",
+    determination == "CTV-05" ~ "Lactobacillus crispatus (CTV-05)",
+    determination == "non CTV-05" ~ "Lactobacillus crispatus (non CTV-05)",
+    .default=str_extract(classification, ";s__(.*)$", group=1)
+  )) %>%
+  left_join(taxonomy_fix) %>%
+  mutate(taxon = coalesce(taxon_fix, taxon)) %>%
+  mutate(taxon = fct_relevel(taxon, "Lactobacillus crispatus (CTV-05)","Lactobacillus crispatus (non CTV-05)")%>% fct_rev() ) %>%
+  ggplot(aes(x=visit_label, y=taxon)) +
+  stat_sum(aes(fill = after_stat(n)), geom = "tile") +
+  stat_sum(aes(label = after_stat(n), size=5), geom = "label", color = "black") +
+  colorspace::scale_fill_continuous_sequential(palette="Purple-Blue", name="number of isolates") +
+  guides(size = "none") +
+  scale_y_discrete("") +
+
+    scale_x_discrete("") +
+  theme(
+    axis.text.y = element_text(face = "italic"),
+    strip.text = element_blank()  # Remove facet labels
+  ) +
+  facet_grid(cols = vars(usubjid), space="free", scales="free_x", drop = TRUE)
+
+# Use rel_heights to make top plots smaller
+isolation_plot <- plot_grid(prop_crisp_plot, prop_ctv05_plot, isolation_numbers, 
+          ncol=1, align="v", axis="lr", 
+          rel_heights = c(1.2, 0.5, 5.5))  
+```
+
+
+```{r sup_figure_2}
+#| fig-width: 11
+#| fig-height: 12
+sup_figure_2 <- plot_grid(isolation_plot, pie_chart_extended, nrow=2, ncol=1, labels="AUTO", rel_heights = c(1,1))
+ggsave("supplemental_figure_2.pdf", sup_figure_2, width=11, height=12)
+```

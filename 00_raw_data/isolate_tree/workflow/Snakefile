@@ -1,0 +1,200 @@
+configfile: "config/config.yaml"
+
+
+
+import pandas as pd
+import os
+from glob import glob
+
+samples_df = pd.read_csv(config["sample_sheet"])
+SAMPLES = samples_df["genome_id"].tolist()
+
+rule target:
+    default_target: True
+    localrule: True
+    input:
+        "results/04.phylo_tree/core_genes.fasttree.tree",
+        "results/04.phylo_tree/core_genes.raxml.bestTree"
+
+
+rule create_genome_code_mapping:
+    output:
+        "results/genome_code_mapping.tsv"
+    params:
+        faa_files = [os.path.join(path_to_bakta, genome_id +".faa") for genome_id, path_to_bakta in zip(samples_df["genome_id"].tolist(),samples_df["path_to_bakta"].tolist())],
+        genome_ids = SAMPLES
+    localrule: True
+    run:
+        import re
+        with open(output[0], 'w') as out:
+            out.write("genome_code\tisolate_id\n")
+            for faa_file, isolate_id in zip(params.faa_files, params.genome_ids):
+                with open(faa_file, 'r') as f:
+                    first_line = f.readline()
+                    # Extract 6-char code from header like >ABCDEF_00001
+                    match = re.search(r'>([A-Z]{6})_', first_line)
+                    if match:
+                        genome_code = match.group(1)
+                        out.write(f"{genome_code}\t{isolate_id}\n")
+
+rule concatenate_faa:
+    localrule: True
+    output:
+        "temp/concatenated.faa"
+    params:
+        file_list = [os.path.join(path_to_bakta, genome_id +".faa") for genome_id, path_to_bakta in zip(samples_df["genome_id"].tolist(),samples_df["path_to_bakta"].tolist())]
+    shell:
+        "cat {params.file_list} > {output}"
+
+rule concatenate_ffn:
+    localrule: True
+    output:
+        "temp/concatenated.ffn"
+    params:
+        file_list = [os.path.join(path_to_bakta, genome_id +".ffn") for genome_id, path_to_bakta in zip(samples_df["genome_id"].tolist(),samples_df["path_to_bakta"].tolist())]
+    shell:
+        "cat {params.file_list} > {output}"
+
+rule hmmsearch_profile:
+    input:
+        fasta="temp/concatenated.faa",
+        profile=config["core_gene_hmm_path"]
+    output:
+        tblout="results/01.hmmsearch/hits.tblout"
+    log:
+        "logs/hmmsearch.log"
+    params:
+        evalue_threshold=0.00000000001,
+        extra="",
+    threads: 8
+    resources:
+        slurm_partition="short",
+        mem_mb=16000,
+        cpus_per_task=8,
+        runtime="12h"
+    wrapper:
+        "v3.0.0/bio/hmmer/hmmsearch"
+
+rule parse_and_filter_hits:
+    localrule: True
+    input:
+        hits=rules.hmmsearch_profile.output.tblout
+    output:
+        parsed_hits = "results/parsed_hits.csv"
+    conda:
+        "envs/tidyverse.yaml"
+    params:
+        min_prevalence = 1,
+        genome_ids = SAMPLES
+    script:
+        "scripts/parse_and_filter_hits.R"
+
+checkpoint prepare_genes_for_alignment:
+    localrule: True
+    input:
+        parsed_hits = rules.parse_and_filter_hits.output.parsed_hits,
+        ffn = "temp/concatenated.ffn"
+    output:
+        directory("results/02.genes_for_alignment")
+    conda:
+        "envs/seqkit.yaml"
+    shell:
+        """
+        mkdir -p {output}
+
+        tail -n +2 {input.parsed_hits} | cut -d',' -f1 | sort -u > {output}/gene_list.txt
+
+        # For each unique gene, extract all corresponding sequences
+        while IFS= read -r gene; do
+            # Get all target_names for this gene (column 2)
+            tail -n +2 {input.parsed_hits} | awk -F',' -v gene="$gene" '$1 == gene {{print $2}}' > {output}/${{gene}}_ids.txt
+
+            # Extract sequences using seqkit
+            seqkit grep -f {output}/${{gene}}_ids.txt {input.ffn} > {output}/${{gene}}.fasta
+
+        done < {output}/gene_list.txt
+
+        """
+
+def get_gene_names(wildcards):
+    """Get list of genes from checkpoint output"""
+    checkpoint_output = checkpoints.prepare_genes_for_alignment.get(**wildcards).output[0]
+    gene_names = glob_wildcards(os.path.join(checkpoint_output, "{gene}.fasta")).gene
+    return expand("results/03.aligned/{gene}.aln", gene=gene_names)
+
+rule align_genes:
+    input:
+        "results/02.genes_for_alignment/{gene}.fasta"
+    output:
+        "results/03.aligned/{gene}.aln"
+    conda:
+        "envs/mafft.yaml"
+    threads: 4
+    resources:
+        slurm_partition="short",
+        mem_mb=4000,
+        cpus_per_task=4,
+        runtime="12h"
+    shell:
+        "mafft --auto --thread {threads} {input} > {output}"
+
+rule concatenate_alignments:
+    localrule: True
+    input:
+        alignments = get_gene_names,
+        mapping = "results/genome_code_mapping.tsv"
+    output:
+        "results/concatenated_alignment.fasta"
+    conda:
+        "envs/biopython.yaml"
+    script:
+        "scripts/concatenate_alignments.py"
+
+rule run_raxmlng:
+    input:
+        rules.concatenate_alignments.output
+    output:
+        tree = "results/04.phylo_tree/core_genes.raxml.bestTree",
+        log = "results/04.phylo_tree/core_genes.raxml.log"
+    log:
+        "logs/raxmlng.log"
+    conda:
+        "envs/raxmlng.yaml"
+    threads: 16
+    resources:
+        slurm_partition="short",
+        mem_mb=32000,
+        cpus_per_task=16,
+        runtime="12h"
+    params:
+        prefix = "results/04.phylo_tree/core_genes",
+        model = config.get('raxml_model', 'GTR+G'),
+        outgroup = config.get('raxml_outgroup', '')
+    shell:
+        """
+        mkdir -p results/04.phylo_tree
+        raxml-ng --search --msa {input} --model {params.model} \
+            --prefix {params.prefix} --threads {threads} \
+            {params.outgroup}
+        """
+
+rule run_fasttree:
+    input:
+        rules.concatenate_alignments.output
+    output:
+        "results/04.phylo_tree/core_genes.fasttree.tree"
+    log:
+        "logs/fasttree.log"
+    conda:
+        "envs/fasttree.yaml"
+    threads: 1  # FastTree doesn't support multithreading
+    resources:
+        slurm_partition="short",
+        mem_mb=8000,
+        cpus_per_task=1,
+        runtime="12h"
+    shell:
+        """
+        mkdir -p results/04.phylo_tree
+        fasttree -gtr -gamma -nt {input} > {output} 2> {log}
+        """

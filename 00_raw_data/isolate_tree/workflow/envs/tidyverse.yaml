@@ -1,0 +1,6 @@
+name: tidyverse
+channels:
+  - conda-forge
+dependencies:
+  - r-base=4.3.2
+  - r-tidyverse=2.0.0

@@ -1,0 +1,3 @@
+core_gene_hmm_path: "input/lactobacillaceae_odb12.hmm"
+sample_sheet: "input/samplesheet.csv"
+outgroup: "LV2B000045"

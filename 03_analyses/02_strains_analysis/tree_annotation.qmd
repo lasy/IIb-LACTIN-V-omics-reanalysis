@@ -1,0 +1,252 @@
+---
+title: "tree annotation"
+format: html
+fig-format: svg
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(ggtree)
+library(ape)
+library(MultiAssayExperiment)
+library(ggbeeswarm)
+library(cowplot)
+library(ggridges)
+library(ggtext)
+theme_set(theme_cowplot(10))
+tree <- ggtree::read.tree("referenced_files/yRKhZbNyW5uhegLmQYSKcA_newick.txt") %>%
+    drop.tip("LV2B000045")
+
+isolate_metadata <- read_csv("referenced_files/lv2b_isolations_bloom.csv")
+
+visit_labels <- tribble(
+    ~visit_name, ~visit_label,
+    "Visit 0", "Pre-MTZ",
+    "Visit 1", "Post-MTZ",
+    "Visit 2", "Week 4",
+    "Visit 3", "Week 8",
+    "Visit 4", "Week 12",
+    "Visit 7", "Week 24"
+) %>%
+    mutate(visit_label = fct_relevel(visit_label, "Pre-MTZ", "Post-MTZ", "Week 4", "Week 8", "Week 12", "Week 24"))
+
+
+sample_metadata <- read_csv("referenced_files/sample_metadata_for_strainfacts.csv", col_types = "cccccnc") %>% select(-visit_label) %>% inner_join(visit_labels) %>% filter(visit_type == "Planned")
+
+
+```
+
+
+```{r}
+
+
+all_genotypes <- list.files("referenced_files/isolate_gtpro/", full.names = TRUE) %>%
+  map_dfr(\(x) read_tsv(x) %>%
+  mutate(expected_genotype = as.numeric(alt_count > ref_count)) %>% 
+  select(position=global_pos, expected_genotype) %>%
+    mutate(isolate = str_extract(x, ("LV2B[^_]+"))))
+
+strainfacts_genotype <- read_tsv("referenced_files/v2_20250227.world.mgen.filt.n300.fit.geno.clean.tsv")
+```
+
+
+```{r}
+
+lv2b_samples <- c("LactinV_CTV05", sample_metadata %>% pull(sample))
+strainfacts_ra <- read_tsv("referenced_files/v2_20250227.world.mgen.filt.n300.fit.ra.clean.tsv") %>%
+  mutate(sample = str_replace(sample, "lactinv_gtpro_tsvs/temp_06_combine_filtered_reads_", "")) %>%
+  mutate(sample = str_replace(sample, "all_gtpro_tsvs_parsed/temp_06_combine_filtered_reads_", "")) %>%
+  mutate(sample = str_replace(sample, "__gtpro__crisp.tsv.temp", "")) %>% filter(sample %in% lv2b_samples)
+
+expected_genotype_df <- read_tsv("referenced_files/temp_06_combine_filtered_reads_LactinV_CTV05__gtpro__crisp.tsv.temp") %>%
+  mutate(expected_genotype = as.numeric(alt_count > ref_count)) %>% 
+  select(position=global_pos, expected_genotype)
+
+
+# strain 5 is identical to expected genotype
+strainfacts_genotype %>% inner_join(expected_genotype_df) %>%
+  group_by(strain) %>%
+  summarise(jaccard_similarity_to_ctv05 = sum(round(genotype) == expected_genotype)/n()) %>% arrange(desc(jaccard_similarity_to_ctv05))
+
+
+lactinv_estimates <- strainfacts_ra %>%
+  right_join(sample_metadata) %>%
+  mutate(strain = case_when(
+    strain == -1~ "remainder",
+    strain == 5 ~ "CTV-05",
+    .default = str_c("s",str_pad(strain, pad="0", width=2)))) %>%
+  pivot_wider(names_from=strain, values_from=community) %>%
+  arrange(USUBJID, visit_label)
+
+lactinv_estimates_long <- lactinv_estimates %>%
+  pivot_longer(-c(sample, USUBJID, arm, visit_name, visit_type, prop_crisp, visit_label), names_to = "strain", values_to = "rel")
+
+lactinv_estimates_long %>% write_csv(
+  "uslactinv_strainfacts_estimates_20251209.csv"
+)
+
+```
+
+
+
+```{r}
+
+
+global_trace <- read_excel("referenced_files/2. Global Trace samples - incl site ID, collection date, visit number.xlsx", skip=1)
+  isolation_metadata <- read_csv("referenced_files/lv2b_isolations_bloom.csv", col_types = cols(.default = col_character()))
+  
+subject_metadata<- read_csv("referenced_files/subject_metadata.csv")
+global_visit_key <- tribble(~VISNO, ~visit_name,
+                            "00", "Visit 0",
+                            "01", "Visit 1",
+                            "02", "Visit 2",
+                             "03", "Visit 3",
+                             "04", "Visit 4",
+                             "07", "Visit 7"
+                            )
+
+
+
+connected_isolation_metadata <- isolation_metadata %>%
+  left_join(global_trace, by=c("Source Swab Sample"="SN")) %>%
+  left_join(subject_metadata %>% select(subject_id, USUBJID=usubjid), by=c("PATID"="subject_id")) %>%
+  left_join(global_visit_key) %>%
+  select(Isolate_ID, USUBJID, visit_name) %>%
+  left_join(sample_metadata)
+
+isolates_of_interest <- tibble(Isolate_ID=tree$tip.label)
+  
+all_jaccard_isolates <- all_genotypes %>% group_by(isolate) %>% filter(n() > 20000) %>% ungroup() %>% semi_join(isolates_of_interest, by=c("isolate" = "Isolate_ID")) %>% 
+left_join(strainfacts_genotype %>% filter(strain != -1)) %>%
+  group_by(strain, isolate) %>%
+  summarise(jaccard = sum(round(genotype) == expected_genotype)/n()) %>% arrange(desc(jaccard))
+
+closest_strain_annotation <- all_jaccard_isolates %>% 
+    ungroup() %>%
+    mutate(strain = if_else(strain == 5, "CTV-05", str_c("Strain ", as.character(strain)))) %>%
+    group_by(isolate) %>%
+    arrange(desc(jaccard)) %>%
+    mutate(closest_strain = dplyr::first(strain)) %>%
+    mutate(color_strain = if_else(strain == closest_strain, strain, "other inferred strain")) %>%
+    ungroup() %>%
+    mutate(label=isolate)
+```
+
+
+```{r jaccard}
+#| fig-width: 5
+#| fig-height: 15
+
+closest_strain_annotation %>%
+  group_by(isolate) %>%
+  mutate(clade=case_when(
+    closest_strain == "CTV-05" & sum(jaccard*(strain=="CTV-05")) > 0.99 ~ "Clade 1",
+    closest_strain == "Strain 71" ~ "Clade 2",
+    closest_strain == "Strain 47" ~ "Clade 3",
+    closest_strain == "Strain 46"  ~ "Clade 4",
+    closest_strain == "CTV-05" & sum(jaccard*(strain=="CTV-05")) < 0.99 ~ "Clade 5",
+    closest_strain == "Strain 14" ~ "Clade 6",
+    closest_strain == "Strain 16" ~ "Clade 7"
+  )) %>%
+    mutate(closest_strain = str_c(clade, "\n", "Closest inferred strain:\n", closest_strain)) %>%
+ggplot( aes(x=jaccard, y=isolate, color=color_strain)) +
+    geom_quasirandom() +
+    scale_x_continuous("Similarity to inferred genotype") +
+    scale_color_manual(values=c("CTV-05"="#D55E00", "Strain 14"="#56B4E9", "Strain 71"="#CC79A7", "Strain 47"="#0072B2", "Strain 16"="#009E73", "Strain 46"="#612B8F", "other inferred strain"="#999999")) +
+    background_grid(major = c("x")) + 
+    facet_wrap(~closest_strain, space="free_y", scales="free_y",strip.position = "left") +
+    theme(axis.text.y=element_text(size=9), strip.placement = "outside", strip.text.y.left = element_text(angle=0))
+```
+
+
+```{r tree}
+#| fig-width: 12
+#| fig-height: 15
+tree %>%
+    left_join(connected_isolation_metadata, by=c("label" ="Isolate_ID" )) %>%
+    mutate(visit_factor = str_c(USUBJID, " ", visit_label)) %>% 
+    left_join(
+all_jaccard_isolates %>% 
+    ungroup() %>%
+    mutate(strain = if_else(strain == 5, "CTV-05", str_c("Strain ", as.character(strain)))) %>%
+    group_by(isolate) %>%
+    arrange(desc(jaccard)) %>%
+    mutate(closest_strain = dplyr::first(strain)) %>%
+    distinct(isolate, closest_strain), by=c("label"="isolate")) %>%
+    mutate(tip_label = str_c(label, str_replace_na(USUBJID, ""), str_replace_na(visit_label, ""), sep=" ")) %>%
+    mutate(tip_label = if_else(label == "CTV05", "CTV-05 complete isolate genome", tip_label)) %>%
+ggtree(aes(color=closest_strain)) +
+    geom_treescale(offset = 1, x=0, y=100) +
+    geom_tiplab(aes(label=tip_label), size=3.5, offset = 0.0005) +
+      ggtree::geom_text2(aes(subset = node %in% c(45)),
+            label = "*",  # unicode star
+            size = 6,
+            nudge_x = -0.0003,
+            color = "gold",
+            hjust = -0.5) +
+    geom_tippoint(aes(shape = visit_factor), size=4, fill="grey", color="#777777") +
+    scale_color_manual(values=c("CTV-05"="#D55E00", "Strain 14"="#56B4E9", "Strain 71"="#CC79A7", "Strain 47"="#0072B2", "Strain 16"="#009E73", "Strain 46"="#612B8F")) +
+    scale_x_continuous(expand = expansion(mult=0.4)) +
+    guides(color = guide_legend(title = "Closest inferred strain", ncol=1)) +
+    scale_shape_manual(values = c(0,15,6,24,17,2,5,18,8,16)) +
+    theme_tree()
+
+```
+
+
+
+```{r}
+#| fig-width: 5
+#| fig-height: 2.5
+
+plot_strain <- function(this_usubjid) {(lactinv_estimates_long %>% filter(USUBJID == this_usubjid) %>% group_by(strain) %>% filter(any(rel > 0.1)) %>% ungroup() %>%
+  mutate(USUBJID = str_c("Participant ", USUBJID)) %>%
+  mutate(scaled_rel = rel*prop_crisp) %>%
+  ungroup() %>%
+  mutate(`Inferred strain` = str_replace(strain,"s", "Strain ")) %>%
+  ggplot(aes(x=visit_label, y=scaled_rel, fill=`Inferred strain`)) +
+  geom_col(data = lactinv_estimates_long %>% filter(USUBJID == this_usubjid) %>% distinct(visit_label) %>% mutate(scaled_rel=1), fill="#cccccc") +
+  geom_col(position="stack") +
+  scale_y_continuous("Microbiota relative abundance", labels=scales::label_percent()) +
+  facet_wrap(~USUBJID) +
+  theme(axis.title.y = element_markdown(),axis.text.x = element_text(angle=45, vjust = 1, hjust=1)) +
+  scale_x_discrete("") +
+  scale_fill_manual(values=c("CTV-05"="#D55E00", "Strain 14"="#56B4E9", "Strain 71"="#CC79A7", "Strain 47"="#0072B2", "Strain 16"="#009E73", "Strain 46"="#612B8F"))) %>% print()}
+
+connected_isolation_metadata %>% distinct(USUBJID) %>% pull(USUBJID) %>% walk(plot_strain)
+
+
+
+
+```
+
+
+```{r}
+assembly_stats <- read_tsv("referenced_files/assembly_stats_all.tsv") %>% janitor::clean_names() %>% rename_with(~ paste0("stats_", .x)) %>% select(isolate_id=1, everything())
+checkm2_results <- read_tsv("referenced_files/checkm2_all.tsv") %>% janitor::clean_names() %>% rename_with(~ paste0("checkm2_", .x)) %>% select(isolate_id=1, everything())
+gtdbtk_results <- read_tsv("referenced_files/gtdbtk.bac120.summary.tsv") %>% janitor::clean_names() %>% rename_with(~ paste0("gtdbtk_", .x)) %>% select(isolate_id=1, everything())
+connected_isolation_metadata 
+
+
+connected_isolation_metadata %>%
+    janitor::clean_names() %>%
+    select(isolate_id, sample, usubjid, visit_label) %>%
+    left_join(assembly_stats %>% select(isolate_id, stats_num_seqs, stats_sum_len, stats_n50)) %>%
+    left_join(checkm2_results %>% select(1,2,3)) %>%
+    left_join(gtdbtk_results %>%
+    separate_wider_delim(gtdbtk_classification, delim=";", names=c("gtdbtk_d", "gtdbtk_p", "gtdbtk_c","gtdbtk_o","gtdbtk_f","gtdbtk_g","gtdbtk_s"), too_few = "align_start", too_many="merge") %>%
+    select(1, gtdbtk_d, gtdbtk_p, gtdbtk_c,gtdbtk_o,gtdbtk_f,gtdbtk_g,gtdbtk_s, gtdbtk_closest_genome_reference,gtdbtk_closest_genome_ani,gtdbtk_warnings)) %>%
+    write_csv("lactinv_isolate_quality_metrics_and_metadata.csv")
+
+
+connected_isolation_metadata %>%
+    janitor::clean_names() %>%
+    select(isolate_id, sample, usubjid, visit_label) %>%
+    left_join(assembly_stats %>% select(isolate_id, stats_num_seqs, stats_sum_len, stats_n50)) %>%
+    left_join(checkm2_results %>% select(1,2,3)) %>%
+    left_join(gtdbtk_results %>%
+    separate_wider_delim(gtdbtk_classification, delim=";", names=c("gtdbtk_d", "gtdbtk_p", "gtdbtk_c","gtdbtk_o","gtdbtk_f","gtdbtk_g","gtdbtk_s"), too_few = "align_start", too_many="merge") %>%
+    select(1, gtdbtk_d, gtdbtk_p, gtdbtk_c,gtdbtk_o,gtdbtk_f,gtdbtk_g,gtdbtk_s, gtdbtk_closest_genome_reference,gtdbtk_closest_genome_ani,gtdbtk_warnings)) %>%
+    filter(str_detect(gtdbtk_s, "crispatus")) %>% distinct(sample)
+```

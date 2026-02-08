@@ -1,0 +1,18 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+properties:
+  isolate_id:
+    type: string
+    description: "Unique identifier for the bacterial isolate"
+  fastq_1:
+    type: string
+    description: "Path to forward read FASTQ file (R1)"
+    pattern: "^.*\\.fastq\\.gz$|^.*\\.fq\\.gz$"
+  fastq_2:
+    type: string
+    description: "Path to reverse read FASTQ file (R2)"
+    pattern: "^.*\\.fastq\\.gz$|^.*\\.fq\\.gz$"
+required:
+  - isolate_id
+  - fastq_1
+  - fastq_2

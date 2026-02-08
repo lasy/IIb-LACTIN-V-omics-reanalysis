@@ -1,0 +1,105 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+properties:
+  samples:
+    type: string
+    description: "Path to samples CSV file"
+  
+  cutadapt:
+    type: object
+    properties:
+      adapter_r1:
+        type: string
+        description: "3' adapter sequence to trim from R1 reads"
+      adapter_r2:
+        type: string
+        description: "3' adapter sequence to trim from R2 reads"
+      min_length:
+        type: integer
+        minimum: 1
+        description: "Minimum read length after trimming"
+      quality_cutoff:
+        type: integer
+        minimum: 0
+        description: "Quality score cutoff for trimming"
+    required: ["adapter_r1", "adapter_r2", "min_length", "quality_cutoff"]
+  
+  sickle:
+    type: object
+    properties:
+      quality_type:
+        type: string
+        enum: ["sanger", "illumina", "solexa"]
+        description: "Quality score encoding type"
+      quality_threshold:
+        type: integer
+        minimum: 0
+        description: "Minimum quality score threshold"
+      length_threshold:
+        type: integer
+        minimum: 1
+        description: "Minimum read length after quality trimming"
+    required: ["quality_type", "quality_threshold", "length_threshold"]
+  
+  unicycler:
+    type: object
+    properties:
+      mode:
+        type: string
+        enum: ["conservative", "normal", "bold"]
+        description: "Unicycler assembly mode"
+      min_fasta_length:
+        type: integer
+        minimum: 1
+        description: "Minimum contig length in output"
+      kmers:
+        type: string
+        description: "Comma-separated list of k-mer sizes for SPAdes"
+      keep:
+        type: integer
+        minimum: 0
+        maximum: 3
+        description: "Level of file retention (0-3)"
+      spades_options:
+        type: string
+        description: "Additional options to pass to SPAdes"
+    required: ["mode", "min_fasta_length", "kmers", "keep", "spades_options"]
+  
+  bakta:
+    type: object
+    properties:
+      db:
+        type: string
+        description: "Path to Bakta database"
+      genus:
+        type: string
+        description: "Genus name for annotation"
+      species:
+        type: string
+        description: "Species name for annotation"
+      min_contig_length:
+        type: integer
+        minimum: 1
+        description: "Minimum contig length to annotate"
+    required: ["db", "genus", "species", "min_contig_length"]
+  
+  gtdbtk:
+    type: object
+    properties:
+      gtdb_data_path:
+        type: string
+        description: "Path to GTDB-Tk database"
+    required: ["gtdb_data_path"]
+  
+  checkm2:
+    type: object
+    properties:
+      database_path:
+        type: string
+        description: "Path to CheckM2 database file"
+      lowmem:
+        type: string
+        description: "Low memory mode flag"
+    required: ["database_path", "lowmem"]
+
+required: ["samples", "cutadapt", "sickle", "unicycler", "bakta", "gtdbtk", "checkm2"]
